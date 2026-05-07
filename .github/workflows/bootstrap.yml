@@ -54,14 +54,20 @@ jobs:
             echo "bootstrapped=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # First-run only: remove the S3 backend block so plan/apply can run
+      # against local state. The bucket it references doesn't exist yet.
+      - name: Disable S3 backend block (pre-bootstrap)
+        if: steps.state.outputs.bootstrapped == 'false'
+        run: mv backend.tf backend.tf.disabled
+
       - name: Init (pre-bootstrap, local state)
         if: steps.state.outputs.bootstrapped == 'false'
-        run: terraform init -backend=false
+        run: terraform init -input=false
 
       - name: Init (post-bootstrap, S3 backend)
         if: steps.state.outputs.bootstrapped == 'true'
         run: |
-          terraform init \
+          terraform init -input=false \
             -backend-config="bucket=$STATE_BUCKET" \
             -backend-config="key=bootstrap/terraform.tfstate" \
             -backend-config="region=$AWS_REGION" \
@@ -79,12 +85,18 @@ jobs:
         if: inputs.mode == 'apply'
         run: terraform apply -input=false -auto-approve
 
+      # First apply only: bring back the S3 backend block, then migrate the
+      # local state into the bucket the apply just created.
+      - name: Restore S3 backend block (first apply only)
+        if: inputs.mode == 'apply' && steps.state.outputs.bootstrapped == 'false'
+        run: mv backend.tf.disabled backend.tf
+
       - name: Migrate state to S3 (first apply only)
         if: inputs.mode == 'apply' && steps.state.outputs.bootstrapped == 'false'
         run: |
           BUCKET=$(terraform output -raw state_bucket_name)
           TABLE=$(terraform output -raw lock_table_name)
-          terraform init -force-copy -migrate-state \
+          terraform init -input=false -force-copy -migrate-state \
             -backend-config="bucket=$BUCKET" \
             -backend-config="key=bootstrap/terraform.tfstate" \
             -backend-config="region=$AWS_REGION" \
