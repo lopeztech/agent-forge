@@ -94,11 +94,9 @@ jobs:
       - name: Migrate state to S3 (first apply only)
         if: inputs.mode == 'apply' && steps.state.outputs.bootstrapped == 'false'
         run: |
-          BUCKET=$(terraform output -raw state_bucket_name)
-          TABLE=$(terraform output -raw lock_table_name)
           terraform init -input=false -force-copy -migrate-state \
-            -backend-config="bucket=$BUCKET" \
+            -backend-config="bucket=$STATE_BUCKET" \
             -backend-config="key=bootstrap/terraform.tfstate" \
             -backend-config="region=$AWS_REGION" \
-            -backend-config="dynamodb_table=$TABLE" \
+            -backend-config="dynamodb_table=$LOCK_TABLE" \
             -backend-config="encrypt=true"
