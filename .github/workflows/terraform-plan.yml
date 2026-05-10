@@ -1,0 +1,94 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    paths:
+      - "infra/envs/**"
+      - "infra/modules/**"
+      - ".github/workflows/terraform-*.yml"
+      - ".terraform-version"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: tf-plan-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: [dev]
+
+    env:
+      AWS_REGION: eu-west-1
+      STATE_BUCKET: agent-forge-tfstate-076124126225-eu-west-1
+      LOCK_TABLE: agent-forge-tflock
+
+    defaults:
+      run:
+        working-directory: infra/envs/${{ matrix.env }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::076124126225:role/agent-forge-gha-bootstrap
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.0
+          terraform_wrapper: false
+
+      - name: Init
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=$STATE_BUCKET" \
+            -backend-config="key=envs/${{ matrix.env }}/terraform.tfstate" \
+            -backend-config="region=$AWS_REGION" \
+            -backend-config="dynamodb_table=$LOCK_TABLE" \
+            -backend-config="encrypt=true"
+
+      - name: Format check
+        working-directory: ${{ github.workspace }}
+        run: terraform fmt -check -recursive infra
+
+      - name: Validate
+        run: terraform validate
+
+      - name: Plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -input=false -no-color 2>&1 | tee plan.txt
+
+      - name: Comment plan on PR
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo "### Terraform plan — \`envs/${{ matrix.env }}\`"
+            echo ""
+            if [ "${{ steps.plan.outcome }}" != "success" ]; then
+              echo "**Plan failed.** See workflow logs for details."
+              echo ""
+            fi
+            echo "<details><summary>Show plan</summary>"
+            echo ""
+            echo '```hcl'
+            head -c 60000 plan.txt 2>/dev/null || echo "(no plan output)"
+            echo ""
+            echo '```'
+            echo ""
+            echo "</details>"
+          } > comment.md
+          gh pr comment "$PR_NUMBER" --body-file comment.md

@@ -56,12 +56,13 @@ Components, in the order an event flows through them:
 - **EventBridge** — event bus. Rules match on `(product_id, label transition)` or `(product_id, PR event)` and invoke the right Step Function with both IDs as input.
 - **Step Functions** — one state machine per issue lifecycle, plus per-role sub-workflows. Inputs always include `(product_id, issue_id)`. Tracks "where is issue #42 on product X" centrally.
 - **ECS Fargate (Spot by default, on-demand on retry)** — agent containers. One image per role. Spawned per task by Step Functions; not long-lived. Lambda is rejected for all six roles because Dev/Test/Functional runs routinely exceed 15 min, and using two runtimes for the shorter roles doubles operational surface area for trivial savings. Spot is the default because all state is checkpointed at label transitions and Step Functions handles retry; on-demand is the fallback after first reclamation.
-- **DynamoDB** — five tables, all keyed by `product_id` first:
+- **DynamoDB** — six tables, all keyed by `product_id` first (except `rate_limits`, which is shared org-wide):
   - `products` — per-product config: target repo URL, `writer_install_id`, `merger_install_id`, spec path, areas-file path, budget caps, model overrides, Functional Tester runtime mode (`ephemeral` or `warm`), drift audit config (cadence, sample size, sampling strategy, horizon), kickback cap, concurrency cap.
-  - `team_memory` — `(product_id, role, key)` per-role long-term memory. `product_id="*"` is the org-global namespace; agents read `global UNION product` with product winning on conflict.
-  - `issue_state` — `(product_id, issue_id)` — per-issue scratchpad, iteration counters, area-lock holdings.
-  - `budget_ledger` — every model call's token + USD cost, queried per product per day.
-  - `rate_limits` — token-bucket state for the Anthropic API key, shared across all products.
+  - `team_memory` — `(product_id, role_key)` per-role long-term memory. SK is `"<role>#<key>"` so a Query returns either all memory for a product, or one role via `begins_with("dev#")`. `product_id="*"` is the org-global namespace; agents read `global UNION product` with product winning on conflict.
+  - `issue_state` — `(product_id, issue_id)` — per-issue scratchpad, iteration counters, forensic pointers.
+  - `budget_ledger` — `(product_id, ts_run_id)` append-only spend log; SK is `"<iso_ts>#<run_id>"` so daily/weekly rollups Query a SK BETWEEN range.
+  - `rate_limits` — `(bucket_id)` token-bucket state for the Anthropic API key, shared across all products. TTL on `expires_at`.
+  - `area_locks` — `(product_id, area_id)` Dev-role area locks for parallelism. TTL on `expires_at` so stuck locks self-release.
 - **S3** — artifacts: full PR diffs, test reports, security scan output, large agent transcripts. Prefixed by `product_id/issue_id/`.
 - **Secrets Manager** — `ANTHROPIC_API_KEY`, two GitHub App private keys (`agent-forge-writer`, `agent-forge-merger`), third-party scanner tokens (semgrep, etc. as needed). Each App has one installation per target repo.
 - **CloudWatch Logs + X-Ray** — per-task logs tagged with `product_id`, end-to-end tracing across role handoffs.
@@ -186,7 +187,7 @@ areas:
 
 **Issue → area assignment.** BA applies `area:<name>` labels when hydrating. If the spec section maps to paths not covered by any declared area, BA applies `area:*` and flags the gap to a human (`human-needed`-adjacent: a `gap:areas-incomplete` label).
 
-**Lock primitive.** DynamoDB conditional write on `(product_id, area_id)` with TTL = 2× per-issue spend cap (~2h default). Multi-area issues acquire all required locks **in alphabetical order** (deadlock-free by canonical resource ordering). `area:*` acquires every area in alphabetical order — equivalent to single-Dev for that issue.
+**Lock primitive.** DynamoDB conditional write on the `area_locks` table (PK `product_id`, SK `area_id`) with `expires_at` TTL = 2× per-issue spend cap (~2h default). Multi-area issues acquire all required locks **in alphabetical order** (deadlock-free by canonical resource ordering). `area:*` acquires every area in alphabetical order — equivalent to single-Dev for that issue.
 
 **Per-product concurrency cap:** default 3 simultaneous Devs, configurable in `products`. Bounds Anthropic rate-limit pressure and daily budget.
 
@@ -308,7 +309,7 @@ infra/                    # Terraform (HCL)
     eventbridge/          # event bus, webhook rules, scheduled rules
     step-functions/       # state machines + asl/ subdir of ASL JSON
     ecs-role/             # parameterized; instantiated 6× (one per agent role)
-    dynamodb/             # products, team_memory, issue_state, budget_ledger, rate_limits
+    dynamodb/             # products, team_memory, issue_state, budget_ledger, rate_limits, area_locks
     secrets/              # Secrets Manager entries
     api-gateway/          # webhook ingress
   envs/
