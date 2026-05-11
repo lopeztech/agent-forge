@@ -70,7 +70,7 @@ Components, in the order an event flows through them:
 
 Model access goes **through Amazon Bedrock `InvokeModel`** in eu-west-1. Auth is IAM-only (Fargate task role and Cost Estimator Lambda role both grant `bedrock:InvokeModel` on the specific model ARNs they need); no API keys to rotate, leak, or store in Secrets Manager. The `shared/models.ts` abstraction keeps the call shape provider-agnostic so a direct Anthropic API path can be wired in later as outage fallback if Bedrock proves unreliable, but v1 ships Bedrock-only.
 
-VPC: agents do not need inbound traffic. Outbound to GitHub is required (`api.github.com`, `*.githubusercontent.com`); Bedrock and every other AWS service is reached via VPC interface endpoints, avoiding a NAT Gateway (~$32/month otherwise).
+Networking: agents and Lambdas have no inbound traffic. Default deployment runs them in **public subnets with no NAT Gateway and no VPC interface endpoints** (Lambda no-VPC; Fargate `assignPublicIp=ENABLED` with empty-inbound security groups). AWS-service calls (Bedrock, DynamoDB, Secrets Manager, STS, Logs, ECR) leave via the IGW but stay on the AWS backbone — zero data-transfer cost intra-region. GitHub egress is the only true internet traffic. Private subnets + interface endpoints are opt-in per product, only when the Functional Tester `warm` mode needs to reach private resources (e.g. an RDS instance). Security posture is equivalent for stateless workers with no listening services.
 
 ## Roles
 
@@ -286,21 +286,35 @@ Prompt caching reduces input cost by ~90% on cache hits. The system prompt + rep
 | 5 issues / day | ~$18 | ~$540 |
 | 10 issues / day | ~$36 | ~$1,080 |
 
-**AWS infrastructure (independent of model cost), monthly estimate:**
+**AWS infrastructure (independent of model cost), monthly estimate at 5 issues/day:**
 
 | Component | Estimate |
 |-----------|---------:|
-| ECS Fargate (5 issues/day, ~30 min/role × 6 roles) | $80–150 |
-| Step Functions (~150 transitions/day) | <$5 |
+| ECS Fargate (Spot by default; ~95 min total task-time per issue across 6 roles incl. ~30% kickback rate) | $5–15 |
+| Lambda (Cost Estimator + comment handler + webhook verifier; mostly idle) | <$1 |
+| Step Functions (~1,800 transitions/mo, free tier covers 4K/region) | $0 |
 | DynamoDB on-demand (light use) | $5–20 |
-| S3 + transfer | $1–5 |
+| S3 (state, artifacts) | $1–5 |
 | EventBridge + API Gateway | <$5 |
-| Secrets Manager (3 secrets) | ~$1 |
+| Secrets Manager (2 GitHub App private keys) | $1 |
+| ECR (~5 GB across 6 role images) | ~$1 |
 | CloudWatch Logs (30-day retention) | $10–30 |
-| VPC endpoints (avoid NAT Gateway) | ~$15 |
-| **Total infra** | **~$120–230** |
+| KMS (state-encryption key) | $1 |
+| **Total infra** | **~$25–80** |
 
-**All-in monthly at 5 issues/day:** ~$720–830.
+Idle baseline (no issues running): only the fixed line items charge — KMS, Secrets Manager, ECR storage, plus negligible S3/DDB. **~$3/mo idle.**
+
+**All-in monthly:**
+
+| Throughput | Variable (model + per-issue infra) | Fixed | Total |
+|------------|-----------------------------------:|------:|------:|
+| Idle (0 issues)        | $0   | $3 | **~$3** |
+| 1 issue/day            | ~$80 | $3 | **~$83** |
+| 5 issues/day           | ~$400 | $25–80 | **~$425–480** |
+| 10 issues/day          | ~$800 | $40–100 | **~$840–900** |
+| 25 issues/day          | ~$2,000 | $80–180 | **~$2,080–2,180** |
+
+The cost-first gate brings expected spend further down whenever many issues estimate sub-`cost_approval_threshold_usd` and auto-proceed — only the cumulative cost of approved issues actually runs.
 
 **Budget circuit breaker** is mandatory. Caps live in `products` (per-product) and as global env defaults; `budget_ledger` is the source of truth for spend:
 
@@ -320,7 +334,7 @@ Prompt caching reduces input cost by ~90% on cache hits. The system prompt + rep
 infra/                    # Terraform (HCL)
   bootstrap/              # one-time — creates the S3 state bucket + DynamoDB lock table
   modules/
-    networking/           # VPC + interface endpoints (avoid NAT Gateway)
+    networking/           # OPTIONAL: per-product private VPC + endpoints (Functional Tester warm mode only)
     eventbridge/          # event bus, webhook rules, scheduled rules
     step-functions/       # state machines + asl/ subdir of ASL JSON
     ecs-role/             # parameterized; instantiated 6× (one per agent role)
@@ -394,8 +408,9 @@ docs/
 - **Model strategy:** Claude-only in v1 (Sonnet 4.6 default, Opus 4.7 for PO + escalation, Haiku reserved). No multi-provider for cost — failure-rate risk and loss of prompt caching erase token savings. Architect `shared/models.ts` and tool definitions to be provider-agnostic in shape so future swapping is config not refactor. Anthropic-outage fallback only: 5min sustained 5xx → existing runs fall back to Claude-on-Bedrock for in-flight, new issue work pauses. Re-evaluate at 6 months with telemetry. (2026-05-01)
 - **Memory eviction:** Score-based at write time. Cap = 100 lessons per `(product, role)`. Score = `recency_decay × usage_count × confidence` (recency half-life 90d). Lowest-scored evicted on write when cap hit. Pinned lessons never evict. Monthly Sonnet "janitor" agent reports contradictions + zero-usage lessons for human review (flags only, no auto-delete). (2026-05-01)
 - **Cross-product memory:** Two-tier with human-gated promotion. `team_memory` supports `(product_id="*", role, key)` org-global rows. Agents read `global UNION product` (product wins on conflict). Agents always write to their own product; promotion to global is via human CLI only (`agent-forge memory promote <role> <key>`). Janitor flags global-tier contradictions for human review. (2026-05-01)
-- **Model provider:** Bedrock-only in v1 (supersedes the 2026-05-01 "direct Anthropic API in normal path, Bedrock as fallback" decision). Reasons: IAM-only auth removes the `ANTHROPIC_API_KEY` secret entirely; calls stay AWS-internal via VPC endpoints (no NAT, no third-party egress); single trust surface for both Fargate roles and the Cost Estimator Lambda. Tradeoff accepted: 1–2 weeks of lag on the absolute newest Claude release vs the direct API. The `shared/models.ts` abstraction keeps the door open to add the direct API as outage fallback if Bedrock proves unreliable. Re-evaluate at 6 months. (2026-05-11)
+- **Model provider:** Bedrock-only in v1 (supersedes the 2026-05-01 "direct Anthropic API in normal path, Bedrock as fallback" decision). Reasons: IAM-only auth removes the `ANTHROPIC_API_KEY` secret entirely; calls stay on AWS's backbone intra-region with zero data-transfer fees and no third-party egress; single trust surface for both Fargate roles and the Cost Estimator Lambda. Tradeoff accepted: 1–2 weeks of lag on the absolute newest Claude release vs the direct API. The `shared/models.ts` abstraction keeps the door open to add the direct API as outage fallback if Bedrock proves unreliable. Re-evaluate at 6 months. (2026-05-11)
 - **Cost-first gate:** Every issue passes through a Cost Estimator Lambda between BA and Dev. Estimator uses Haiku 4.5 (~$0.005/issue) on the BA-structured acceptance criteria + similar past issues from `budget_ledger`, posts a `p50`/`p90` per-role breakdown as an issue comment, and either auto-promotes to `state:ready` (if `p50_total ≤ products.cost_approval_threshold_usd`, default $1) or parks at `state:awaiting-cost-approval` until a maintainer comments `/approve-cost` or `/cancel`. Estimator runs *after* BA so the estimate sees acceptance criteria, not free-form issue text. Estimate-vs-actual logged in `issue_state` for weekly calibration. (2026-05-11)
+- **Networking baseline:** Public subnets, no NAT Gateway, no VPC interface endpoints for the default deployment. Stateless workers (agent Fargate tasks, Cost Estimator Lambda, comment handler, webhook verifier) run in the default VPC's public subnets (Fargate `assignPublicIp=ENABLED`, security groups deny all inbound) or with no VPC config (Lambda). AWS-service calls leave via the IGW and stay on the AWS backbone intra-region — zero data-transfer cost, no PrivateLink premium. Saves ~$60–130/mo over the original "private VPC + 6 interface endpoints in 2 AZs" plan. Private subnets + interface endpoints become opt-in per product, only when Functional Tester `warm` mode needs to reach private resources (e.g. an RDS instance). Security posture is equivalent for workers with no listening services. (2026-05-11)
 
 ## Open design decisions
 
