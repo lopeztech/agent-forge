@@ -57,20 +57,20 @@ Components, in the order an event flows through them:
 - **Step Functions** — one state machine per issue lifecycle, plus per-role sub-workflows. Inputs always include `(product_id, issue_id)`. Tracks "where is issue #42 on product X" centrally.
 - **ECS Fargate (Spot by default, on-demand on retry)** — agent containers. One image per role. Spawned per task by Step Functions; not long-lived. Lambda is rejected for all six roles because Dev/Test/Functional runs routinely exceed 15 min, and using two runtimes for the shorter roles doubles operational surface area for trivial savings. Spot is the default because all state is checkpointed at label transitions and Step Functions handles retry; on-demand is the fallback after first reclamation.
 - **DynamoDB** — six tables, all keyed by `product_id` first (except `rate_limits`, which is shared org-wide):
-  - `products` — per-product config: target repo URL, `writer_install_id`, `merger_install_id`, spec path, areas-file path, budget caps, model overrides, Functional Tester runtime mode (`ephemeral` or `warm`), drift audit config (cadence, sample size, sampling strategy, horizon), kickback cap, concurrency cap.
+  - `products` — per-product config: target repo URL, `writer_install_id`, `merger_install_id`, spec path, areas-file path, budget caps, model overrides, Functional Tester runtime mode (`ephemeral` or `warm`), drift audit config (cadence, sample size, sampling strategy, horizon), kickback cap, concurrency cap, `cost_approval_threshold_usd` (issues estimated above this require human `/approve-cost` before running; default $1).
   - `team_memory` — `(product_id, role_key)` per-role long-term memory. SK is `"<role>#<key>"` so a Query returns either all memory for a product, or one role via `begins_with("dev#")`. `product_id="*"` is the org-global namespace; agents read `global UNION product` with product winning on conflict.
-  - `issue_state` — `(product_id, issue_id)` — per-issue scratchpad, iteration counters, forensic pointers.
+  - `issue_state` — `(product_id, issue_id)` — per-issue scratchpad, iteration counters, forensic pointers, cost estimate (`p50`, `p90`, `model`, `run_id`, posted-comment ID), and the actual-vs-estimate ratio once the issue is `state:done`.
   - `budget_ledger` — `(product_id, ts_run_id)` append-only spend log; SK is `"<iso_ts>#<run_id>"` so daily/weekly rollups Query a SK BETWEEN range.
-  - `rate_limits` — `(bucket_id)` token-bucket state for the Anthropic API key, shared across all products. TTL on `expires_at`.
+  - `rate_limits` — `(bucket_id)` token-bucket state for Bedrock per-model invocation quotas (per region per model, AWS-side), shared across all products. TTL on `expires_at`.
   - `area_locks` — `(product_id, area_id)` Dev-role area locks for parallelism. TTL on `expires_at` so stuck locks self-release.
 - **S3** — artifacts: full PR diffs, test reports, security scan output, large agent transcripts. Prefixed by `product_id/issue_id/`.
-- **Secrets Manager** — `ANTHROPIC_API_KEY`, two GitHub App private keys (`agent-forge-writer`, `agent-forge-merger`), third-party scanner tokens (semgrep, etc. as needed). Each App has one installation per target repo.
+- **Secrets Manager** — two GitHub App private keys (`agent-forge-writer`, `agent-forge-merger`) plus third-party scanner tokens (semgrep, etc. as needed). No Anthropic API key — model access goes through Bedrock with IAM auth from the Fargate task role. Each GitHub App has one installation per target repo.
 - **CloudWatch Logs + X-Ray** — per-task logs tagged with `product_id`, end-to-end tracing across role handoffs.
 - **EventBridge Scheduler** — cron triggers for long-running jobs: nightly backlog hydration, weekly drift audit, daily budget rollup. Schedules iterate over the `products` table.
 
-Model access goes **direct to the Anthropic API** in the normal path. Reason: model availability lag on Bedrock for the latest Claude versions; agent-forge wants to use the right model for each role on day one of release. **Bedrock is wired in solely as an outage fallback** — when the Anthropic API returns sustained 5xx (>5 min), in-flight runs cut over to Claude-on-Bedrock for the same model tier and new issue work pauses until the direct API recovers.
+Model access goes **through Amazon Bedrock `InvokeModel`** in eu-west-1. Auth is IAM-only (Fargate task role and Cost Estimator Lambda role both grant `bedrock:InvokeModel` on the specific model ARNs they need); no API keys to rotate, leak, or store in Secrets Manager. The `shared/models.ts` abstraction keeps the call shape provider-agnostic so a direct Anthropic API path can be wired in later as outage fallback if Bedrock proves unreliable, but v1 ships Bedrock-only.
 
-VPC: agents do not need inbound traffic. Outbound to the Anthropic API and GitHub is required. Use VPC endpoints for AWS services to avoid a NAT Gateway (~$32/month otherwise).
+VPC: agents do not need inbound traffic. Outbound to GitHub is required (`api.github.com`, `*.githubusercontent.com`); Bedrock and every other AWS service is reached via VPC interface endpoints, avoiding a NAT Gateway (~$32/month otherwise).
 
 ## Roles
 
@@ -79,10 +79,22 @@ Six teams. Each is a separate container image, system prompt, tool allow-list, I
 ### 1. Business Analyst (BA)
 
 - **Trigger:** new issue with label `state:idea`, OR scheduled nightly "hydrate" run that scans the spec for un-issued work.
-- **Job:** read `spec/`, expand the request into acceptance criteria, split into sub-issues if it spans more than ~1 day of work, attach risks and out-of-scope notes, transition to `state:ready`.
+- **Job:** read `spec/`, expand the request into acceptance criteria, split into sub-issues if it spans more than ~1 day of work, attach risks and out-of-scope notes, transition to `state:cost-estimating`.
 - **Tools:** GitHub Issues read/write, repo file reads, web search.
 - **Default model:** **Sonnet 4.6** — strong reasoning over docs, but no code generation; Opus is wasteful for routine refinement.
 - **Escalation:** Opus 4.7 for the initial spec-to-backlog hydration of a brand-new spec area (high stakes, infrequent).
+
+### Cost Estimator (gate, between BA and Dev)
+
+Not a Fargate role — a small Lambda that gates every issue's actual implementation cost.
+
+- **Trigger:** issue at `state:cost-estimating`.
+- **Job:** read the issue title, body, BA-extracted acceptance criteria, and the cost of similar past issues from `budget_ledger`. Call Haiku 4.5 once to produce a per-role token + USD estimate with `p50`/`p90` confidence range, write it to `issue_state`, and post a structured comment on the issue. If `p50_total ≤ products.cost_approval_threshold_usd`, transition to `state:ready` (auto-approved, pipeline continues). Otherwise transition to `state:awaiting-cost-approval` and park.
+- **Approval mechanism:** maintainer comments `/approve-cost` → transition to `state:ready`. Maintainer comments `/cancel` → transition to `state:cancelled` (terminal). Both handled by a glue Lambda on `issue_comment.created`.
+- **Tools:** Bedrock `InvokeModel` (Haiku 4.5), GitHub Issues read/write, DynamoDB read on `budget_ledger`, DynamoDB write on `issue_state`.
+- **Default model:** **Haiku 4.5** — cheap classifier, target ~$0.005/issue.
+- **Calibration:** when the issue reaches `state:done`, record `(estimate_p50, actual, ratio)` in `issue_state`. A weekly digest surfaces drift (mean ratio, outliers) so the rate-card prompt can be tuned. The estimator's own spend is logged to `budget_ledger` like any other model call.
+- **Failure modes:** estimator timeout / Bedrock 5xx → label `human-needed` (don't silently bypass the gate); estimate above the per-issue $12 hard cap → reject without prompting (`/approve-cost` cannot override the budget circuit breaker).
 
 ### 2. Developer
 
@@ -132,15 +144,18 @@ Six teams. Each is a separate container image, system prompt, tool allow-list, I
 The chain is **issue label → EventBridge rule → Step Function → role container**. There is exactly one source of truth: the GitHub Issue's `state:*` label.
 
 ```
-state:idea                 → BA
-state:ready                → Developer
-state:in-dev               (working — no trigger; Dev pushes to PR)
-state:awaiting-tests       → Test Engineer
-state:awaiting-functional  → Functional Tester
-state:awaiting-security    → Security Reviewer
-state:awaiting-po          → PO
-state:done                 (terminal)
-human-needed               (parked — only humans clear it)
+state:idea                    → BA
+state:cost-estimating         → Cost Estimator (Lambda)
+state:awaiting-cost-approval  (parked — /approve-cost or /cancel from a maintainer)
+state:cancelled               (terminal — set by /cancel)
+state:ready                   → Developer
+state:in-dev                  (working — no trigger; Dev pushes to PR)
+state:awaiting-tests          → Test Engineer
+state:awaiting-functional     → Functional Tester
+state:awaiting-security       → Security Reviewer
+state:awaiting-po             → PO
+state:done                    (terminal)
+human-needed                  (parked — only humans clear it)
 ```
 
 Each agent's last action sets the next label. A label change emits a webhook → API Gateway → EventBridge → matching rule → Step Function execution → ECS Fargate task with the right image. A per-issue Step Function execution wraps the full lifecycle so the workflow view shows the whole chain in one place.
@@ -189,7 +204,7 @@ areas:
 
 **Lock primitive.** DynamoDB conditional write on the `area_locks` table (PK `product_id`, SK `area_id`) with `expires_at` TTL = 2× per-issue spend cap (~2h default). Multi-area issues acquire all required locks **in alphabetical order** (deadlock-free by canonical resource ordering). `area:*` acquires every area in alphabetical order — equivalent to single-Dev for that issue.
 
-**Per-product concurrency cap:** default 3 simultaneous Devs, configurable in `products`. Bounds Anthropic rate-limit pressure and daily budget.
+**Per-product concurrency cap:** default 3 simultaneous Devs, configurable in `products`. Bounds Bedrock per-model invocation-quota pressure and daily budget.
 
 **Lock contention.** When Dev's workflow starts and cannot acquire its lock(s), it exits without changing the issue state — issue stays at `state:ready`. On lock release, the holding Dev emits an `area-lock-released` EventBridge event; a sweeper Lambda finds the oldest matching `state:ready` issue and re-fires Dev for it. `state:ready` is the queue; no extra states.
 
@@ -239,7 +254,7 @@ Things that matter when the team operates for months, not days.
 
 ## Cost model
 
-**Pricing assumptions (Anthropic API, as of early 2026 — verify before relying on these):**
+**Pricing assumptions (Bedrock `InvokeModel` in eu-west-1, as of early 2026 — verify on the AWS Bedrock pricing page before relying on these):**
 
 | Model | $ / M input tokens | $ / M output tokens |
 |-------|-------------------:|--------------------:|
@@ -295,7 +310,7 @@ Prompt caching reduces input cost by ~90% on cache hits. The system prompt + rep
 - Global per-day cap (across all products): $250 default.
 - Trip behavior: write a `budget:tripped` flag scoped to the tripped scope (product or global). Role triggers check the relevant scope and short-circuit until a human clears it. One product tripping never pauses another.
 
-**Anthropic rate limiting** is also mandatory. The `rate_limits` table holds token-bucket state for the Anthropic API key; every role acquires tokens before calling the model. Without this, a busy product can starve others when they all hit the same Anthropic org rate limit.
+**Bedrock quota management** is also mandatory. The `rate_limits` table holds token-bucket state for Bedrock per-model invocation quotas (account- and region-scoped); every role acquires tokens before calling `InvokeModel`. Without this, a busy product can starve others when they all hit the same Bedrock account-level quota for a given model.
 
 **Spot reclamation handling.** All Fargate tasks run on Spot by default. Step Functions catches the `Task.Failed` event from a spot reclamation and retries on on-demand. Agents must checkpoint state to `issue_state` after every meaningful step (file write, label transition, tool call cluster) so a reclaimed task resumes without losing work.
 
@@ -326,7 +341,7 @@ agents/
 shared/
   github/                 # GitHub App auth, label transitions, PR helpers
   state/                  # DynamoDB + S3 helpers
-  budget/                 # spend tracking + circuit breaker + Anthropic rate limiter
+  budget/                 # spend tracking + circuit breaker + Bedrock quota tracker
   prompts/                # shared prompt fragments + cache-key conventions
   models.ts               # single source of truth for per-role model selection
 spec/                     # specs for agent-forge itself (BA reads from here)
@@ -355,8 +370,8 @@ docs/
 - All cross-agent communication goes through the issue/PR. Never call one agent from another directly.
 - Every agent run logs `{issue, role, model, input_tokens, cached_tokens, output_tokens, cost_usd}` to `budget_ledger`. The circuit breaker reads this. No exceptions.
 - Prompt caching is mandatory on every role. Stable system prompt + spec excerpts + team memory all go in the cached prefix. Per-issue context goes in the uncached suffix.
-- Model selection lives in one place: `shared/models.ts`. Do not hardcode model IDs in role code. Keep the `getModel(role, attempt) → ModelHandle` shape provider-agnostic; do not bake Anthropic-shaped fields into the type so future provider swaps stay a config change.
-- Tool definitions live in a normalized format and are serialized per-provider at call time. Even though v1 only targets Anthropic, the normalization keeps the door open without paying refactor cost later.
+- Model selection lives in one place: `shared/models.ts`. Do not hardcode model IDs in role code. Keep the `getModel(role, attempt) → ModelHandle` shape provider-agnostic so a direct-Anthropic-API outage fallback (or any future provider) is a config swap, not a refactor.
+- Tool definitions live in a normalized format and are serialized per-provider at call time. v1 only targets Bedrock; the normalization keeps the door open without paying refactor cost later.
 
 ## Human gates (deliberate, not exhaustive)
 
@@ -379,7 +394,9 @@ docs/
 - **Model strategy:** Claude-only in v1 (Sonnet 4.6 default, Opus 4.7 for PO + escalation, Haiku reserved). No multi-provider for cost — failure-rate risk and loss of prompt caching erase token savings. Architect `shared/models.ts` and tool definitions to be provider-agnostic in shape so future swapping is config not refactor. Anthropic-outage fallback only: 5min sustained 5xx → existing runs fall back to Claude-on-Bedrock for in-flight, new issue work pauses. Re-evaluate at 6 months with telemetry. (2026-05-01)
 - **Memory eviction:** Score-based at write time. Cap = 100 lessons per `(product, role)`. Score = `recency_decay × usage_count × confidence` (recency half-life 90d). Lowest-scored evicted on write when cap hit. Pinned lessons never evict. Monthly Sonnet "janitor" agent reports contradictions + zero-usage lessons for human review (flags only, no auto-delete). (2026-05-01)
 - **Cross-product memory:** Two-tier with human-gated promotion. `team_memory` supports `(product_id="*", role, key)` org-global rows. Agents read `global UNION product` (product wins on conflict). Agents always write to their own product; promotion to global is via human CLI only (`agent-forge memory promote <role> <key>`). Janitor flags global-tier contradictions for human review. (2026-05-01)
+- **Model provider:** Bedrock-only in v1 (supersedes the 2026-05-01 "direct Anthropic API in normal path, Bedrock as fallback" decision). Reasons: IAM-only auth removes the `ANTHROPIC_API_KEY` secret entirely; calls stay AWS-internal via VPC endpoints (no NAT, no third-party egress); single trust surface for both Fargate roles and the Cost Estimator Lambda. Tradeoff accepted: 1–2 weeks of lag on the absolute newest Claude release vs the direct API. The `shared/models.ts` abstraction keeps the door open to add the direct API as outage fallback if Bedrock proves unreliable. Re-evaluate at 6 months. (2026-05-11)
+- **Cost-first gate:** Every issue passes through a Cost Estimator Lambda between BA and Dev. Estimator uses Haiku 4.5 (~$0.005/issue) on the BA-structured acceptance criteria + similar past issues from `budget_ledger`, posts a `p50`/`p90` per-role breakdown as an issue comment, and either auto-promotes to `state:ready` (if `p50_total ≤ products.cost_approval_threshold_usd`, default $1) or parks at `state:awaiting-cost-approval` until a maintainer comments `/approve-cost` or `/cancel`. Estimator runs *after* BA so the estimate sees acceptance criteria, not free-form issue text. Estimate-vs-actual logged in `issue_state` for weekly calibration. (2026-05-11)
 
 ## Open design decisions
 
-All v0 architecture decisions resolved as of 2026-05-01. New questions that emerge during implementation should be added here.
+All v0 architecture decisions resolved as of 2026-05-01; cost-gate + Bedrock decisions added 2026-05-11. New questions that emerge during implementation should be added here.
