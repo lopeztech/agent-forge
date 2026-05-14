@@ -1,0 +1,21 @@
+{
+  "name": "agent-forge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Platform for autonomous, long-running software product teams composed of Claude agents.",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "smoke:github-app": "node --experimental-strip-types scripts/smoke-github-app.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.700.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

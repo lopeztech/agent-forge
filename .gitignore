@@ -23,3 +23,8 @@ terraform.rc
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Node / TypeScript
+node_modules/
+dist/
+*.tsbuildinfo
