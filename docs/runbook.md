@@ -36,17 +36,59 @@ The script opens a browser and walks you through ~4 clicks total:
 
 Final screen prints both installation IDs (record them when you onboard a product into the `products` DynamoDB table) and the smoke-test rate-limit results. Expected: `core limit = 5000` for both (App-authenticated). On failure, the terminal log shows the underlying error.
 
-### Webhook signing secret
+---
 
-The webhook-ingress slice (not yet built) needs both Apps' webhook configs to point at the API Gateway endpoint and use the random secret Terraform generated. To preview it:
+## Wiring webhooks to a target repo
+
+One-time setup per target product. Two steps: register the product in the `products` table so the verifier can resolve incoming webhooks, then flip each App's webhook config to point at the agent-forge API Gateway endpoint.
+
+### Step 1 — Seed the `products` row
+
+The webhook verifier resolves `repository.full_name` → `product_id` via a GSI on the `products` table. Until a row exists, every webhook returns "no product for repo" and the event is dropped silently (200 OK so GitHub doesn't retry).
 
 ```bash
-aws secretsmanager get-secret-value \
-  --secret-id agent-forge-dev-webhook-signing-secret \
+AWS_PROFILE=agent-forge-dev AWS_REGION=eu-west-1 npm run seed:product -- \
+  --product-id lopeztech-agent-forge \
+  --repo lopeztech/agent-forge \
+  --writer-install <WRITER_INSTALL_ID> \
+  --merger-install <MERGER_INSTALL_ID>
+```
+
+(Install IDs were printed by `npm run onboard:github-apps`. For an already-installed App, they're also visible on each App's settings page → *Advanced* tab.)
+
+Defaults the script applies: `spec_path=spec/`, `areas_path=.agent-forge/areas.yml`, `functional_runtime_mode=ephemeral`, `cost_approval_threshold_usd=1`, `concurrency_cap=3`. Override any of them with the corresponding flag.
+
+### Step 2 — Point both Apps' webhooks at the API Gateway endpoint
+
+Get the endpoint URL and shared signing secret:
+
+```bash
+terraform -chdir=infra/envs/dev output -raw webhook_url
+aws secretsmanager get-secret-value --secret-id agent-forge-dev-webhook-signing-secret \
   --query SecretString --output text
 ```
 
-Don't paste it into the Apps yet — the webhook URL doesn't exist. You'll do this when the webhook ingress lands.
+For **each** App (writer and merger):
+
+1. GitHub → your App → *General* tab.
+2. **Webhook → Active:** check.
+3. **Webhook URL:** paste the `webhook_url` output.
+4. **Webhook secret:** paste the signing secret.
+5. **SSL verification:** leave as *Enable SSL verification* (API Gateway has a valid cert).
+6. Save changes.
+7. Scroll to *Subscribe to events*. For the **writer** App, check: *Issues*, *Issue comment*, *Pull request*, *Pull request review*, *Push*. For the **merger** App: just *Pull request review* (so it sees PO comments without firing on writer activity).
+8. *Recent Deliveries* tab → click the most recent delivery (the `ping`) → *Redeliver* if it shows red. You should see `pong` come back.
+
+### Step 3 — Verify end-to-end
+
+Tail the catch-all log group while you label an issue on the target repo:
+
+```bash
+aws logs tail --follow --region eu-west-1 \
+  "$(terraform -chdir=infra/envs/dev output -json event_log_groups | jq -r .catch_all)"
+```
+
+Apply a label (e.g. `state:idea`) to any issue. Within ~2s you should see a JSON event with `source: agent-forge.webhook`, `detail-type: issues`, and `detail.product_id: lopeztech-agent-forge`. That confirms HMAC → product resolution → bus delivery. If nothing shows up, drop down to the verifier Lambda's log group (`event_log_groups.verifier_lambda`) to see why the verifier rejected the call.
 
 ---
 

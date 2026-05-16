@@ -5,6 +5,9 @@ on:
     paths:
       - "infra/envs/**"
       - "infra/modules/**"
+      - "infra/glue/**"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/terraform-*.yml"
       - ".terraform-version"
 
@@ -46,6 +49,24 @@ jobs:
         with:
           terraform_version: 1.10.0
           terraform_wrapper: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install npm deps
+        working-directory: ${{ github.workspace }}
+        run: npm ci
+
+      - name: Build glue Lambdas
+        working-directory: ${{ github.workspace }}
+        run: |
+          for pkg in infra/glue/*/package.sh; do
+            echo "::group::$(dirname "$pkg")"
+            bash "$pkg"
+            echo "::endgroup::"
+          done
 
       - name: Init
         run: |

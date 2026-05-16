@@ -2,13 +2,26 @@ locals {
   tables = {
     # Per-product configuration: repo URL, GitHub App install IDs, budget caps,
     # model overrides, drift-audit config, etc.
+    #
+    # repo_full_name-index lets the webhook verifier resolve an incoming
+    # "owner/repo" → product_id in O(1) instead of scanning. Projection is
+    # KEYS_ONLY because the verifier only needs the product_id; the full row
+    # is fetched later by the agent that handles the event.
     products = {
       hash_key  = "product_id"
       range_key = null
       attributes = [
         { name = "product_id", type = "S" },
+        { name = "repo_full_name", type = "S" },
       ]
       ttl_attribute = null
+      global_secondary_indexes = [
+        {
+          name            = "repo_full_name-index"
+          hash_key        = "repo_full_name"
+          projection_type = "KEYS_ONLY"
+        },
+      ]
     }
 
     # Per-(product, role) memory. SK encodes "<role>#<key>" so a Query can
@@ -21,7 +34,8 @@ locals {
         { name = "product_id", type = "S" },
         { name = "role_key", type = "S" },
       ]
-      ttl_attribute = null
+      ttl_attribute            = null
+      global_secondary_indexes = []
     }
 
     # Per-issue scratchpad: iteration counters, kickback count, last role,
@@ -33,7 +47,8 @@ locals {
         { name = "product_id", type = "S" },
         { name = "issue_id", type = "S" },
       ]
-      ttl_attribute = null
+      ttl_attribute            = null
+      global_secondary_indexes = []
     }
 
     # Append-only spend log. SK is "<iso_ts>#<run_id>" so daily/weekly
@@ -45,18 +60,21 @@ locals {
         { name = "product_id", type = "S" },
         { name = "ts_run_id", type = "S" },
       ]
-      ttl_attribute = null
+      ttl_attribute            = null
+      global_secondary_indexes = []
     }
 
-    # Token-bucket state for the Anthropic API key, shared across all products.
-    # TTL on stale buckets so an outage-era record self-cleans.
+    # Token-bucket state for Bedrock per-model invocation quotas, shared
+    # across all products. TTL on stale buckets so an outage-era record
+    # self-cleans.
     rate_limits = {
       hash_key  = "bucket_id"
       range_key = null
       attributes = [
         { name = "bucket_id", type = "S" },
       ]
-      ttl_attribute = "expires_at"
+      ttl_attribute            = "expires_at"
+      global_secondary_indexes = []
     }
 
     # Area-lock records for the Dev role. One row per (product_id, area_id)
@@ -68,7 +86,8 @@ locals {
         { name = "product_id", type = "S" },
         { name = "area_id", type = "S" },
       ]
-      ttl_attribute = "expires_at"
+      ttl_attribute            = "expires_at"
+      global_secondary_indexes = []
     }
   }
 }
@@ -100,6 +119,15 @@ resource "aws_dynamodb_table" "this" {
     content {
       attribute_name = ttl.value
       enabled        = true
+    }
+  }
+
+  dynamic "global_secondary_index" {
+    for_each = each.value.global_secondary_indexes
+    content {
+      name            = global_secondary_index.value.name
+      hash_key        = global_secondary_index.value.hash_key
+      projection_type = global_secondary_index.value.projection_type
     }
   }
 
