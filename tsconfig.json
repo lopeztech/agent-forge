@@ -17,6 +17,6 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["shared/**/*.ts", "scripts/**/*.ts"],
+  "include": ["shared/**/*.ts", "scripts/**/*.ts", "infra/glue/**/src/**/*.ts"],
   "exclude": ["node_modules", "**/dist"]
 }

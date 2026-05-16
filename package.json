@@ -10,13 +10,18 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "onboard:github-apps": "node --experimental-strip-types scripts/onboard-github-apps.ts",
+    "seed:product": "node --experimental-strip-types scripts/seed-product.ts",
     "smoke:github-app": "node --experimental-strip-types scripts/smoke-github-app.ts"
   },
   "dependencies": {
-    "@aws-sdk/client-secrets-manager": "^3.700.0"
+    "@aws-sdk/client-dynamodb": "^3.1048.0",
+    "@aws-sdk/client-eventbridge": "^3.1048.0",
+    "@aws-sdk/client-secrets-manager": "^3.700.0",
+    "@aws-sdk/lib-dynamodb": "^3.1048.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.7.0"
   }
 }

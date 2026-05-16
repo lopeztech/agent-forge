@@ -25,3 +25,22 @@ output "github_app_secret_arns" {
   }
   description = "ARNs for least-privilege IAM policy attachment on the Fargate task roles and webhook verifier Lambda."
 }
+
+output "webhook_url" {
+  value       = module.api_gateway.webhook_url
+  description = "Public HTTPS URL to paste into both GitHub Apps' webhook config. POSTs from GitHub land here."
+}
+
+output "event_bus_name" {
+  value       = module.eventbridge.bus_name
+  description = "Custom EventBridge bus name. Role-specific rules attach to this bus."
+}
+
+output "event_log_groups" {
+  value = {
+    catch_all       = module.eventbridge.catch_all_log_group_name
+    apigw_access    = module.api_gateway.access_log_group_name
+    verifier_lambda = module.webhook_verifier.log_group_name
+  }
+  description = "CloudWatch log groups for debugging webhook ingress end-to-end."
+}
