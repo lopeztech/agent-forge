@@ -9,6 +9,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "onboard:github-apps": "node --experimental-strip-types scripts/onboard-github-apps.ts",
     "smoke:github-app": "node --experimental-strip-types scripts/smoke-github-app.ts"
   },
   "dependencies": {
