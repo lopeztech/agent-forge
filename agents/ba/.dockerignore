@@ -1,0 +1,14 @@
+node_modules
+**/dist
+.git
+.github
+infra
+docs
+.claude
+.vscode
+.idea
+scripts
+spec
+*.tfstate
+*.tfstate.*
+.terraform

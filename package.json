@@ -10,6 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "onboard:github-apps": "node --experimental-strip-types scripts/onboard-github-apps.ts",
+    "seed:labels": "node --experimental-strip-types scripts/seed-labels.ts",
     "seed:product": "node --experimental-strip-types scripts/seed-product.ts",
     "smoke:github-app": "node --experimental-strip-types scripts/smoke-github-app.ts"
   },

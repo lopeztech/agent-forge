@@ -24,37 +24,42 @@ function base64url(input: Buffer | string): string {
   return buf.toString("base64url");
 }
 
-export async function getAppCredentials(
-  prefix: string,
-  app: AppName,
+export async function getAppCredentialsFromSecret(
+  secretName: string,
 ): Promise<AppCredentials> {
-  const name = appSecretName(prefix, app);
-  const raw = await getSecretString(name);
+  const raw = await getSecretString(secretName);
 
   let parsed: Partial<AppCredentials>;
   try {
     parsed = JSON.parse(raw) as Partial<AppCredentials>;
   } catch {
     throw new Error(
-      `Secret "${name}" is not valid JSON. Expected { app_id, private_key }. ` +
+      `Secret "${secretName}" is not valid JSON. Expected { app_id, private_key }. ` +
         `Run the upload step in docs/runbook.md.`,
     );
   }
 
   if (!parsed.app_id || !parsed.private_key) {
     throw new Error(
-      `Secret "${name}" is missing app_id or private_key.`,
+      `Secret "${secretName}" is missing app_id or private_key.`,
     );
   }
   if (parsed.app_id === PLACEHOLDER || parsed.private_key === PLACEHOLDER) {
     throw new Error(
-      `Secret "${name}" still contains the Terraform placeholder. ` +
+      `Secret "${secretName}" still contains the Terraform placeholder. ` +
         `Upload real credentials via aws secretsmanager put-secret-value first ` +
         `(see docs/runbook.md).`,
     );
   }
 
   return { app_id: parsed.app_id, private_key: parsed.private_key };
+}
+
+export async function getAppCredentials(
+  prefix: string,
+  app: AppName,
+): Promise<AppCredentials> {
+  return getAppCredentialsFromSecret(appSecretName(prefix, app));
 }
 
 // GitHub caps App JWTs at 10 minutes. We default to 9 minutes and subtract 30s
@@ -88,12 +93,27 @@ export function mintAppJWT(
   return `${signingInput}.${base64url(signature)}`;
 }
 
+export async function getInstallationTokenFromSecret(
+  secretName: string,
+  installId: string | number,
+): Promise<InstallationToken> {
+  const creds = await getAppCredentialsFromSecret(secretName);
+  return exchangeJWTForInstallationToken(creds, installId);
+}
+
 export async function getInstallationToken(
   prefix: string,
   app: AppName,
   installId: string | number,
 ): Promise<InstallationToken> {
   const creds = await getAppCredentials(prefix, app);
+  return exchangeJWTForInstallationToken(creds, installId);
+}
+
+async function exchangeJWTForInstallationToken(
+  creds: AppCredentials,
+  installId: string | number,
+): Promise<InstallationToken> {
   const jwt = mintAppJWT(creds);
 
   const url = `https://api.github.com/app/installations/${installId}/access_tokens`;
@@ -110,7 +130,7 @@ export async function getInstallationToken(
   if (!response.ok) {
     const body = await response.text();
     throw new Error(
-      `GitHub installation token exchange failed for app="${app}" install=${installId}: ` +
+      `GitHub installation token exchange failed for install=${installId}: ` +
         `${response.status} ${response.statusText}\n${body}`,
     );
   }
