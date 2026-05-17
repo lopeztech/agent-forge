@@ -44,3 +44,18 @@ output "event_log_groups" {
   }
   description = "CloudWatch log groups for debugging webhook ingress end-to-end."
 }
+
+output "ba_state_machine_arn" {
+  value       = module.step_functions.ba_state_machine_arn
+  description = "BA state machine ARN. Open in the Step Functions console to inspect executions."
+}
+
+output "ba_task_log_group" {
+  value       = module.agent_ba.log_group_name
+  description = "CloudWatch log group for the BA Fargate task's container output. `aws logs tail` here to see agent runs."
+}
+
+output "ba_image_repository_url" {
+  value       = module.ecr_ba.repository_url
+  description = "ECR repository the BA image is pushed to. The agent-images workflow tags :latest + :sha-<commit>."
+}

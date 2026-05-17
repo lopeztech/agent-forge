@@ -92,6 +92,71 @@ Apply a label (e.g. `state:idea`) to any issue. Within ~2s you should see a JSON
 
 ---
 
+## Bootstrapping the BA agent on a target repo
+
+Once webhooks deliver, you still need three pieces in place before a `state:idea` label actually causes the BA Fargate task to run: the label vocabulary, a BA image in ECR, and an issue in the target repo to label.
+
+### Step 1 — Seed the label vocabulary
+
+```bash
+AWS_PROFILE=agent-forge-dev AWS_REGION=eu-west-1 npm run seed:labels -- \
+  --repo lopeztech/agent-forge \
+  --install <WRITER_INSTALL_ID>
+```
+
+Idempotent — re-runs only touch labels whose color/description drifted.
+
+### Step 2 — Build and push the BA image
+
+The first apply creates an empty ECR repo. Push an image to it before triggering the BA task, otherwise Fargate fails with `CannotPullContainerError`.
+
+```bash
+# Manually trigger the agent-images workflow against main:
+gh workflow run agent-images.yml --ref main
+# or push any commit touching agents/ba/** to fire it automatically.
+```
+
+Watch:
+```bash
+gh run watch $(gh run list --workflow=agent-images.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+```
+
+Confirm:
+```bash
+AWS_PROFILE=agent-forge-dev AWS_REGION=eu-west-1 aws ecr list-images \
+  --repository-name agent-forge-dev/ba --query 'imageIds[].imageTag' --output text
+# should include "latest" and "sha-<git_sha>"
+```
+
+### Step 3 — Trigger an end-to-end run
+
+Create a throwaway issue and apply `state:idea`:
+
+```bash
+gh issue create --repo lopeztech/agent-forge \
+  --title "BA orchestration smoke test" \
+  --body "Slice A end-to-end check."
+gh issue edit <ISSUE_NUMBER> --repo lopeztech/agent-forge --add-label state:idea
+```
+
+Tail the BA task log group while you wait:
+
+```bash
+aws logs tail --follow --region eu-west-1 \
+  "$(terraform -chdir=infra/envs/dev output -raw ba_task_log_group)"
+```
+
+Within ~30s of applying the label you should see:
+- The Step Function execution start (visible in the AWS console at `output ba_state_machine_arn`).
+- The BA container's structured-JSON logs flow into the task log group.
+- A new comment on the issue from the writer App ("BA stub picked up this issue").
+- The label transition from `state:idea` to `state:cost-estimating`.
+- A row in `budget_ledger` for the run.
+
+If the task fails to start, check the Step Function execution's event view — `CannotPullContainerError` means Step 2 hasn't completed. `AccessDeniedException` on Secrets Manager or DynamoDB means an IAM scoping bug.
+
+---
+
 ## Off-boarding the GitHub Apps
 
 Reverse of the above:
