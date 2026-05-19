@@ -37,6 +37,7 @@ import {
 
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { postComment, transitionLabel } from "../../../shared/github/repo.ts";
+import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
 import {
   type ContentBlock,
   costUsd,
@@ -100,6 +101,7 @@ type ProductRow = {
   product_id: string;
   repo_full_name: string;
   writer_install_id?: string;
+  spec_path?: string;
 };
 
 type GitHubIssue = {
@@ -182,7 +184,7 @@ const SUBMIT_EXPANSION_TOOL = {
   },
 };
 
-const SYSTEM_PROMPT = `
+const BASE_SYSTEM_PROMPT = `
 You are agent-forge's Business Analyst (BA). You read an incoming GitHub
 issue and expand it into a structured backlog item that downstream roles
 (Cost Estimator, Developer, Tester, etc.) can act on.
@@ -203,7 +205,45 @@ You MUST call the submit_expansion tool exactly once. Do not produce any
 free-form text response.
 `.trim();
 
-async function runBA(issue: GitHubIssue): Promise<{
+function buildSystemPrompt(spec: SpecReadResult): string {
+  if (spec.missing || spec.files.length === 0) {
+    return BASE_SYSTEM_PROMPT;
+  }
+
+  const specBlocks = spec.files
+    .map(
+      (f) =>
+        `<file path="${f.path}">\n${f.content.trim()}\n</file>`,
+    )
+    .join("\n\n");
+
+  const truncationNote = spec.truncated_by
+    ? `\n\nNote: spec was truncated by ${spec.truncated_by} cap; ` +
+      `lower-priority files (alphabetical order) were dropped. ` +
+      `Work from what's here.`
+    : "";
+
+  return [
+    BASE_SYSTEM_PROMPT,
+    "",
+    "=====================",
+    "PRODUCT SPECIFICATION",
+    "=====================",
+    "The following is the product's spec/ directory. Treat this as the",
+    "authoritative source for product scope, conventions, and constraints.",
+    "When relevant, reference specific spec sections or file paths in your",
+    "acceptance criteria, risks, or out-of-scope notes. If the issue and",
+    "spec conflict, surface that as a risk.",
+    "",
+    specBlocks,
+    truncationNote,
+  ].join("\n");
+}
+
+async function runBA(
+  issue: GitHubIssue,
+  spec: SpecReadResult,
+): Promise<{
   expansion: BAExpansion;
   model: ReturnType<typeof getModelByTier>;
   costUsd: number;
@@ -215,7 +255,7 @@ async function runBA(issue: GitHubIssue): Promise<{
     `Issue #${issue.number}: ${issue.title}\n\n---\n\n${issue.body ?? "(no body)"}`;
 
   const result = await model.invoke({
-    system: SYSTEM_PROMPT,
+    system: buildSystemPrompt(spec),
     messages: [{ role: "user", content: userMessage }],
     maxTokens: 2048,
     tools: [SUBMIT_EXPANSION_TOOL],
@@ -294,8 +334,22 @@ function bullets(items: string[], fallback = "_(none)_"): string {
   return items.map((s) => `- ${s}`).join("\n");
 }
 
+function fmtSpecFooter(spec: SpecReadResult, specPath: string): string {
+  if (spec.missing) {
+    return `<sub>spec: no \`${specPath}\` directory found in repo — expansion based on issue body only.</sub>`;
+  }
+  if (spec.files.length === 0) {
+    return `<sub>spec: \`${specPath}\` exists but is empty — expansion based on issue body only.</sub>`;
+  }
+  const kb = (spec.total_bytes / 1024).toFixed(1);
+  const trunc = spec.truncated_by ? `, truncated by ${spec.truncated_by} cap` : "";
+  return `<sub>spec: ${spec.files.length} file${spec.files.length === 1 ? "" : "s"} from \`${specPath}\` (${kb} KB${trunc}).</sub>`;
+}
+
 function buildComment(
   expansion: BAExpansion,
+  spec: SpecReadResult,
+  specPath: string,
   modelId: string,
   runId: string,
 ): string {
@@ -316,6 +370,8 @@ function buildComment(
     `_${expansion.rationale}_`,
     "",
     `Transitioning \`state:idea\` → \`state:cost-estimating\`.`,
+    "",
+    fmtSpecFooter(spec, specPath),
   ].join("\n");
 }
 
@@ -325,6 +381,8 @@ function buildComment(
 
 async function writeIssueState(args: {
   expansion: BAExpansion;
+  spec: SpecReadResult;
+  spec_path: string;
   model_id: string;
   run_id: string;
 }): Promise<void> {
@@ -338,6 +396,13 @@ async function writeIssueState(args: {
           ...args.expansion,
           model: args.model_id,
           run_id: args.run_id,
+          spec: {
+            path: args.spec_path,
+            files: args.spec.files.length,
+            total_bytes: args.spec.total_bytes,
+            truncated_by: args.spec.truncated_by,
+            missing: args.spec.missing,
+          },
         },
         updated_at: new Date().toISOString(),
       },
@@ -381,6 +446,22 @@ async function main(): Promise<void> {
   const issue = await fetchIssue(token);
   log({ msg: "fetched issue", title: issue.title });
 
+  const specPath = product.spec_path ?? "spec/";
+  const spec = await readSpecTree({
+    token,
+    userAgent: USER_AGENT,
+    repo: REPO,
+    path: specPath,
+  });
+  log({
+    msg: "read spec",
+    spec_path: specPath,
+    files: spec.files.length,
+    total_bytes: spec.total_bytes,
+    truncated_by: spec.truncated_by,
+    missing: spec.missing,
+  });
+
   const runId = runIdFromEnv();
 
   const {
@@ -388,10 +469,12 @@ async function main(): Promise<void> {
     model,
     costUsd: baCostUsd,
     usage,
-  } = await runBA(issue);
+  } = await runBA(issue, spec);
 
   await writeIssueState({
     expansion,
+    spec,
+    spec_path: specPath,
     model_id: model.bedrockModelId,
     run_id: runId,
   });
@@ -401,7 +484,7 @@ async function main(): Promise<void> {
     { token, userAgent: USER_AGENT },
     REPO,
     ISSUE_NUMBER,
-    buildComment(expansion, model.bedrockModelId, runId),
+    buildComment(expansion, spec, specPath, model.bedrockModelId, runId),
   );
   log({ msg: "posted expansion comment" });
 
