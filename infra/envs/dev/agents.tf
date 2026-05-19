@@ -74,8 +74,9 @@ module "agent_ba" {
     area_locks    = module.dynamodb.table_arns["area_locks"]
   }
 
-  # Slice A: no Bedrock yet (the stub doesn't call any model).
-  bedrock_model_arns = []
+  # BA-real (Slice B-followup): expand issues with Sonnet 4.6.
+  # Profile + 6 underlying foundation-model ARNs (EU geographic CRIS).
+  bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
 }
 
 # ------------------------------------------------------------------------------

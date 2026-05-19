@@ -34,8 +34,8 @@ export type ModelTier = "opus-4-7" | "sonnet-4-6" | "haiku-4-5";
 // eu-south-2). IAM needs grants on both the profile ARN AND every underlying
 // foundation-model ARN the profile can fan out to — see infra/envs/dev/cost-gate.tf.
 export const BEDROCK_MODEL_IDS: Record<ModelTier, string> = {
-  "opus-4-7": "eu.anthropic.claude-opus-4-7-v1:0",
-  "sonnet-4-6": "eu.anthropic.claude-sonnet-4-6-v1:0",
+  "opus-4-7": "eu.anthropic.claude-opus-4-7",
+  "sonnet-4-6": "eu.anthropic.claude-sonnet-4-6",
   "haiku-4-5": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
 };
 
