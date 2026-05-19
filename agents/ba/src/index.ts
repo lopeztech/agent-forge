@@ -1,26 +1,30 @@
-// BA role — stub entrypoint.
+// BA (Business Analyst) — first real Claude-powered role.
 //
-// Slice A scope: prove the orchestration path works end-to-end (label →
-// EventBridge → Step Function → Fargate → GitHub API → label transition)
-// without depending on Bedrock. The real BA agent (spec reading,
-// acceptance-criteria extraction, sub-issue splitting, Bedrock InvokeModel
-// with prompt caching) lands in Slice B.
+// Trigger: issue gets label `state:idea`. EventBridge → Step Function → this
+// Fargate task. Env vars come from RunTask container overrides
+// (see infra/modules/step-functions/asl/ba-issue-lifecycle.asl.json).
 //
-// Behaviour:
-//   1. Read env vars set by the Step Function's RunTask container override.
-//   2. Look up writer_install_id from the products row.
-//   3. Mint an installation token for the writer App.
-//   4. Post a comment on the issue identifying this run.
-//   5. Transition the label state:idea → state:cost-estimating.
-//   6. Write a budget_ledger row with zero spend (no LLM call yet).
+// Job (BA-thin per the BA-real slice scope):
+//   1. Fetch the issue (title + body) from GitHub.
+//   2. Call Sonnet 4.6 via Bedrock with tool-use forced output: expand into
+//      acceptance criteria, surface risks, capture out-of-scope notes,
+//      tag complexity. NO spec/ reading yet — that's a follow-up slice.
+//   3. Post a structured markdown comment with the expansion.
+//   4. Write issue_state.ba_expansion so the Cost Estimator can read
+//      structured criteria instead of raw issue body.
+//   5. Transition state:idea → state:cost-estimating.
+//   6. Record the Sonnet spend in budget_ledger.
 //
 // Failure modes:
-//   - Any uncaught error: process exits non-zero → ECS task fails →
-//     Step Function transitions to its TaskFailed state. The issue keeps
-//     its state:idea label (no transition happens), so the next time the
-//     issue is touched the label change re-fires the rule. This is correct
-//     for transient errors. For permanent errors we'll add explicit
-//     human-needed labeling in Slice B.
+//   - Bedrock 5xx, tool not called, etc. → process exits non-zero, Step
+//     Function transitions to TaskFailed. Issue keeps state:idea so the
+//     next label touch re-fires the rule.
+//
+// Out of scope this slice (deliberate):
+//   - Reading spec/ from the target repo
+//   - Sub-issue splitting on "large" complexity
+//   - team_memory read/write
+//   - Opus 4.7 escalation for brand-new spec hydration
 
 import {
   DynamoDBClient,
@@ -32,13 +36,17 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
+import { postComment, transitionLabel } from "../../../shared/github/repo.ts";
+import {
+  type ContentBlock,
+  costUsd,
+  getModelByTier,
+} from "../../../shared/models.ts";
+import { recordSpend } from "../../../shared/budget.ts";
 
-type ProductRow = {
-  product_id: string;
-  repo_full_name: string;
-  writer_install_id?: string;
-  merger_install_id?: string;
-};
+// ---------------------------------------------------------------------------
+// Env
+// ---------------------------------------------------------------------------
 
 const REGION = process.env.AWS_REGION ?? "eu-west-1";
 
@@ -49,7 +57,7 @@ function required(name: string): string {
 }
 
 const PRODUCT_ID = required("AGENT_FORGE_PRODUCT_ID");
-const ISSUE_NUMBER = required("AGENT_FORGE_ISSUE_NUMBER");
+const ISSUE_NUMBER = Number(required("AGENT_FORGE_ISSUE_NUMBER"));
 const REPO = required("AGENT_FORGE_REPO");
 const APP_SECRET_NAME = required("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = required("AGENT_FORGE_PRODUCTS_TABLE");
@@ -58,23 +66,212 @@ const ENV = required("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
 const LABEL = process.env.AGENT_FORGE_LABEL ?? "unknown";
 
-// budget_ledger lives at ${name_prefix}-budget_ledger. We could pass the
-// full name as an env var; for now derive it from ENV which encodes the
-// prefix suffix. Keeps the env contract minimal.
-const BUDGET_LEDGER_TABLE = `agent-forge-${ENV}-budget_ledger`;
+// Table names derived from name_prefix. The cost-estimator Lambda receives
+// these as explicit env vars; the BA still derives. Normalising both is
+// a follow-up cleanup.
+const NAME_PREFIX = `agent-forge-${ENV}`;
+const ISSUE_STATE_TABLE = `${NAME_PREFIX}-issue_state`;
+const BUDGET_LEDGER_TABLE = `${NAME_PREFIX}-budget_ledger`;
+
+const USER_AGENT = `agent-forge-${ROLE}`;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
 function log(obj: Record<string, unknown>): void {
-  // ECS awslogs driver works best with one JSON object per line.
   console.log(JSON.stringify({
     role: ROLE,
     env: ENV,
     product_id: PRODUCT_ID,
-    issue: Number(ISSUE_NUMBER),
+    issue: ISSUE_NUMBER,
     delivery_id: DELIVERY_ID,
     ...obj,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+type ProductRow = {
+  product_id: string;
+  repo_full_name: string;
+  writer_install_id?: string;
+};
+
+type GitHubIssue = {
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+};
+
+type Complexity = "trivial" | "small" | "medium" | "large";
+
+type BAExpansion = {
+  acceptance_criteria: string[];
+  risks: string[];
+  out_of_scope: string[];
+  complexity: Complexity;
+  rationale: string;
+};
+
+// ---------------------------------------------------------------------------
+// Sonnet 4.6 tool-use call
+// ---------------------------------------------------------------------------
+
+const SUBMIT_EXPANSION_TOOL = {
+  name: "submit_expansion",
+  description:
+    "Submit the structured expansion of this issue: acceptance criteria, " +
+    "risks, out-of-scope notes, and a complexity tag. You MUST call this " +
+    "exactly once. Do not produce any free-form text.",
+  input_schema: {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "acceptance_criteria",
+      "risks",
+      "out_of_scope",
+      "complexity",
+      "rationale",
+    ],
+    properties: {
+      acceptance_criteria: {
+        type: "array",
+        minItems: 1,
+        maxItems: 15,
+        items: { type: "string" },
+        description:
+          "Concrete, testable conditions for this issue to be considered done. " +
+          "Each one should be a single observable behaviour or property.",
+      },
+      risks: {
+        type: "array",
+        maxItems: 8,
+        items: { type: "string" },
+        description:
+          "Technical risks, edge cases, or implementation pitfalls a Dev " +
+          "should be aware of. Empty array if none.",
+      },
+      out_of_scope: {
+        type: "array",
+        maxItems: 8,
+        items: { type: "string" },
+        description:
+          "Adjacent work that might seem in-scope but isn't — to prevent " +
+          "scope creep. Empty array if obvious.",
+      },
+      complexity: {
+        enum: ["trivial", "small", "medium", "large"],
+        description:
+          "Rough size: trivial (<2h), small (<half day), medium (~1 day), " +
+          "large (>1 day, likely needs splitting — a follow-up slice will " +
+          "auto-split these).",
+      },
+      rationale: {
+        type: "string",
+        description:
+          "1-3 sentences explaining the expansion — primary driver of " +
+          "complexity, why these specific risks matter, anything else worth noting.",
+      },
+    },
+  },
+};
+
+const SYSTEM_PROMPT = `
+You are agent-forge's Business Analyst (BA). You read an incoming GitHub
+issue and expand it into a structured backlog item that downstream roles
+(Cost Estimator, Developer, Tester, etc.) can act on.
+
+You are NOT the developer. Do not write code, do not propose implementations,
+do not commit to a design. Your job is purely to clarify scope:
+
+- Acceptance criteria: what observable behaviour signals "done"?
+- Risks: what could trip an implementer up?
+- Out of scope: what does this issue NOT include?
+- Complexity: rough size, used downstream to decide if the issue should be split.
+
+Be concise — short bullet points, not paragraphs. Prefer concrete, testable
+statements over abstract ones. If the issue body already gives some of these,
+preserve them and fill gaps; don't restate them verbatim.
+
+You MUST call the submit_expansion tool exactly once. Do not produce any
+free-form text response.
+`.trim();
+
+async function runBA(issue: GitHubIssue): Promise<{
+  expansion: BAExpansion;
+  model: ReturnType<typeof getModelByTier>;
+  costUsd: number;
+  usage: { input_tokens: number; cached_tokens: number; output_tokens: number };
+}> {
+  const model = getModelByTier("sonnet-4-6");
+
+  const userMessage =
+    `Issue #${issue.number}: ${issue.title}\n\n---\n\n${issue.body ?? "(no body)"}`;
+
+  const result = await model.invoke({
+    system: SYSTEM_PROMPT,
+    messages: [{ role: "user", content: userMessage }],
+    maxTokens: 2048,
+    tools: [SUBMIT_EXPANSION_TOOL],
+    toolChoice: { type: "tool", name: "submit_expansion" },
+    temperature: 0,
+  });
+
+  const toolUse = result.content.find(
+    (b): b is Extract<ContentBlock, { type: "tool_use" }> =>
+      b.type === "tool_use" && b.name === "submit_expansion",
+  );
+  if (!toolUse) {
+    throw new Error(
+      `BA did not call submit_expansion (stop_reason=${result.stopReason}, ` +
+        `content=${JSON.stringify(result.content)})`,
+    );
+  }
+
+  log({
+    msg: "BA expansion returned",
+    model: model.bedrockModelId,
+    usage: result.usage,
+    cost_usd: result.costUsd,
+  });
+
+  return {
+    expansion: toolUse.input as BAExpansion,
+    model,
+    costUsd: result.costUsd,
+    usage: result.usage,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// GitHub helpers
+// ---------------------------------------------------------------------------
+
+async function fetchIssue(token: string): Promise<GitHubIssue> {
+  const r = await fetch(
+    `https://api.github.com/repos/${REPO}/issues/${ISSUE_NUMBER}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": USER_AGENT,
+      },
+    },
+  );
+  if (!r.ok) {
+    throw new Error(
+      `GET /repos/${REPO}/issues/${ISSUE_NUMBER} failed: ${r.status} ${r.statusText}`,
+    );
+  }
+  const data = (await r.json()) as GitHubIssue;
+  return data;
 }
 
 async function fetchProductRow(): Promise<ProductRow> {
@@ -84,102 +281,83 @@ async function fetchProductRow(): Promise<ProductRow> {
       Key: { product_id: PRODUCT_ID },
     }),
   );
-  if (!r.Item) {
-    throw new Error(`No products row for product_id=${PRODUCT_ID}`);
-  }
+  if (!r.Item) throw new Error(`No products row for product_id=${PRODUCT_ID}`);
   return r.Item as ProductRow;
 }
 
-async function githubRequest(
-  token: string,
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<Response> {
-  const init: RequestInit = {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": `agent-forge-${ROLE}`,
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-    },
-  };
-  if (body !== undefined) {
-    init.body = JSON.stringify(body);
-  }
-  const r = await fetch(`https://api.github.com${path}`, init);
-  if (!r.ok) {
-    const text = await r.text();
-    throw new Error(
-      `GitHub API ${method} ${path} failed: ${r.status} ${r.statusText}\n${text}`,
-    );
-  }
-  return r;
+// ---------------------------------------------------------------------------
+// Comment formatting
+// ---------------------------------------------------------------------------
+
+function bullets(items: string[], fallback = "_(none)_"): string {
+  if (items.length === 0) return fallback;
+  return items.map((s) => `- ${s}`).join("\n");
 }
 
-async function postComment(token: string, body: string): Promise<void> {
-  await githubRequest(token, "POST", `/repos/${REPO}/issues/${ISSUE_NUMBER}/comments`, {
-    body,
-  });
+function buildComment(
+  expansion: BAExpansion,
+  modelId: string,
+  runId: string,
+): string {
+  return [
+    `## BA expansion (run \`${runId}\`, ${modelId})`,
+    "",
+    `**Complexity:** \`${expansion.complexity}\``,
+    "",
+    `### Acceptance criteria`,
+    bullets(expansion.acceptance_criteria),
+    "",
+    `### Risks`,
+    bullets(expansion.risks),
+    "",
+    `### Out of scope`,
+    bullets(expansion.out_of_scope),
+    "",
+    `_${expansion.rationale}_`,
+    "",
+    `Transitioning \`state:idea\` → \`state:cost-estimating\`.`,
+  ].join("\n");
 }
 
-async function transitionLabel(
-  token: string,
-  fromLabel: string,
-  toLabel: string,
-): Promise<void> {
-  // Remove the source label. If it's already gone (e.g. a manual reset),
-  // GitHub returns 404; treat that as fine.
-  const removeResp = await fetch(
-    `https://api.github.com/repos/${REPO}/issues/${ISSUE_NUMBER}/labels/${encodeURIComponent(fromLabel)}`,
-    {
-      method: "DELETE",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": `agent-forge-${ROLE}`,
-      },
-    },
-  );
-  if (!removeResp.ok && removeResp.status !== 404) {
-    throw new Error(
-      `Removing ${fromLabel} failed: ${removeResp.status} ${removeResp.statusText}`,
-    );
-  }
+// ---------------------------------------------------------------------------
+// State writes
+// ---------------------------------------------------------------------------
 
-  await githubRequest(token, "POST", `/repos/${REPO}/issues/${ISSUE_NUMBER}/labels`, {
-    labels: [toLabel],
-  });
-}
-
-async function recordRun(): Promise<void> {
-  const ts = new Date().toISOString();
-  // budget_ledger SK shape: <iso_ts>#<run_id>. Run ID is the ECS task ARN
-  // when present; otherwise a short random fallback.
-  const runId = (process.env.ECS_TASK_ARN ?? process.env.AGENT_FORGE_DELIVERY_ID ?? `local-${Date.now()}`)
-    .split("/")
-    .slice(-1)[0]!;
+async function writeIssueState(args: {
+  expansion: BAExpansion;
+  model_id: string;
+  run_id: string;
+}): Promise<void> {
   await ddb.send(
     new PutCommand({
-      TableName: BUDGET_LEDGER_TABLE,
+      TableName: ISSUE_STATE_TABLE,
       Item: {
         product_id: PRODUCT_ID,
-        ts_run_id: `${ts}#${runId}`,
-        role: ROLE,
-        issue_number: Number(ISSUE_NUMBER),
-        model: "none",
-        input_tokens: 0,
-        cached_tokens: 0,
-        output_tokens: 0,
-        cost_usd: 0,
-        note: "slice-A stub: no LLM call",
+        issue_id: String(ISSUE_NUMBER),
+        ba_expansion: {
+          ...args.expansion,
+          model: args.model_id,
+          run_id: args.run_id,
+        },
+        updated_at: new Date().toISOString(),
       },
     }),
   );
 }
+
+function runIdFromEnv(): string {
+  return (
+    process.env.ECS_TASK_ARN ??
+    process.env.AGENT_FORGE_DELIVERY_ID ??
+    `local-${Date.now()}`
+  )
+    .split("/")
+    .slice(-1)[0]!;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   log({ msg: "starting", repo: REPO, label: LABEL });
@@ -193,27 +371,78 @@ async function main(): Promise<void> {
   if (!product.writer_install_id) {
     throw new Error(`products[${PRODUCT_ID}] has no writer_install_id`);
   }
-  log({ msg: "fetched product", writer_install_id: product.writer_install_id });
 
-  const { token, expiresAt } = await getInstallationTokenFromSecret(
+  const { token } = await getInstallationTokenFromSecret(
     APP_SECRET_NAME,
     product.writer_install_id,
   );
-  log({ msg: "minted installation token", expires_at: expiresAt.toISOString() });
+  log({ msg: "minted installation token" });
+
+  const issue = await fetchIssue(token);
+  log({ msg: "fetched issue", title: issue.title });
+
+  const runId = runIdFromEnv();
+
+  const {
+    expansion,
+    model,
+    costUsd: baCostUsd,
+    usage,
+  } = await runBA(issue);
+
+  await writeIssueState({
+    expansion,
+    model_id: model.bedrockModelId,
+    run_id: runId,
+  });
+  log({ msg: "wrote issue_state.ba_expansion" });
 
   await postComment(
-    token,
-    `🤖 **BA stub** picked up this issue (slice A: orchestration validation, no LLM yet).\n\n` +
-      `Transitioning label \`state:idea\` → \`state:cost-estimating\`. The Cost Estimator Lambda will take over once it's wired in (next slice).\n\n` +
-      `<sub>delivery_id: \`${DELIVERY_ID}\`</sub>`,
+    { token, userAgent: USER_AGENT },
+    REPO,
+    ISSUE_NUMBER,
+    buildComment(expansion, model.bedrockModelId, runId),
   );
-  log({ msg: "posted comment" });
+  log({ msg: "posted expansion comment" });
 
-  await transitionLabel(token, "state:idea", "state:cost-estimating");
+  await transitionLabel(
+    { token, userAgent: USER_AGENT },
+    REPO,
+    ISSUE_NUMBER,
+    "state:idea",
+    "state:cost-estimating",
+  );
   log({ msg: "label transitioned", from: "state:idea", to: "state:cost-estimating" });
 
-  await recordRun();
-  log({ msg: "recorded run in budget_ledger" });
+  await recordSpend({
+    tableName: BUDGET_LEDGER_TABLE,
+    runId,
+    spend: {
+      product_id: PRODUCT_ID,
+      issue_number: ISSUE_NUMBER,
+      role: ROLE,
+      model: model.bedrockModelId,
+      input_tokens: usage.input_tokens,
+      cached_tokens: usage.cached_tokens,
+      output_tokens: usage.output_tokens,
+      cost_usd: baCostUsd,
+    },
+  });
+  log({ msg: "recorded spend", cost_usd: baCostUsd });
+
+  // Safety: assert reported cost matches the pricing table.
+  const recomputed = costUsd("sonnet-4-6", {
+    input: usage.input_tokens,
+    cached: usage.cached_tokens,
+    output: usage.output_tokens,
+  });
+  if (Math.abs(recomputed - baCostUsd) > 1e-9) {
+    log({
+      msg: "cost mismatch — pricing table may have drifted",
+      recomputed,
+      reported: baCostUsd,
+    });
+  }
 
   log({ msg: "done" });
 }

@@ -53,8 +53,12 @@ data "aws_iam_policy_document" "this" {
   }
 
   statement {
-    sid       = "WriteIssueState"
-    actions   = ["dynamodb:PutItem", "dynamodb:UpdateItem"]
+    sid = "ReadWriteIssueState"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+    ]
     resources = [var.issue_state_table_arn]
   }
 

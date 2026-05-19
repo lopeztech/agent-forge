@@ -219,9 +219,37 @@ You MUST call the submit_estimate tool exactly once. Do not produce any
 free-form text response.
 `.trim();
 
+type BAExpansionSummary = {
+  acceptance_criteria?: string[];
+  risks?: string[];
+  out_of_scope?: string[];
+  complexity?: string;
+  rationale?: string;
+};
+
+function formatBAExpansion(b: BAExpansionSummary): string {
+  const lines: string[] = ["", "---", "**BA expansion** (use this as the authoritative scope; the issue body above is the raw user request):"];
+  if (b.complexity) lines.push(`- complexity: ${b.complexity}`);
+  if (b.acceptance_criteria?.length) {
+    lines.push(`- acceptance criteria:`);
+    for (const c of b.acceptance_criteria) lines.push(`  - ${c}`);
+  }
+  if (b.risks?.length) {
+    lines.push(`- risks:`);
+    for (const r of b.risks) lines.push(`  - ${r}`);
+  }
+  if (b.out_of_scope?.length) {
+    lines.push(`- out of scope:`);
+    for (const o of b.out_of_scope) lines.push(`  - ${o}`);
+  }
+  if (b.rationale) lines.push(`- BA rationale: ${b.rationale}`);
+  return lines.join("\n");
+}
+
 async function runEstimator(
   issue: { number: number; title: string; body?: string | null },
   product_id: string,
+  baExpansion: BAExpansionSummary | undefined,
 ): Promise<{
   estimate: Estimate;
   totals: { p50_total_usd: number; p90_total_usd: number };
@@ -232,7 +260,8 @@ async function runEstimator(
   const model = getModelByTier("haiku-4-5");
 
   const userMessage =
-    `Issue #${issue.number}: ${issue.title}\n\n---\n\n${issue.body ?? "(no body)"}`;
+    `Issue #${issue.number}: ${issue.title}\n\n---\n\n${issue.body ?? "(no body)"}` +
+    (baExpansion ? formatBAExpansion(baExpansion) : "");
 
   const result = await model.invoke({
     system: SYSTEM_PROMPT,
@@ -356,6 +385,29 @@ async function fetchProductRow(product_id: string): Promise<ProductRow> {
   return r.Item as ProductRow;
 }
 
+async function fetchBAExpansion(
+  product_id: string,
+  issue_number: number,
+): Promise<BAExpansionSummary | undefined> {
+  try {
+    const r = await ddb.send(
+      new GetCommand({
+        TableName: ISSUE_STATE_TABLE,
+        Key: { product_id, issue_id: String(issue_number) },
+        ProjectionExpression: "ba_expansion",
+      }),
+    );
+    return (r.Item?.ba_expansion as BAExpansionSummary | undefined) ?? undefined;
+  } catch (err) {
+    // Best-effort: never let a state-lookup failure block the estimator.
+    log({
+      msg: "ba_expansion fetch failed; proceeding without it",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
 async function writeIssueState(args: {
   product_id: string;
   issue_number: number;
@@ -455,10 +507,17 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
     product.writer_install_id,
   );
 
+  // ---- read BA expansion if BA wrote one --------------------------------
+  // BA-real writes issue_state.ba_expansion before transitioning the label.
+  // Missing expansion is normal during a slice-A→slice-B transition window
+  // (or if BA was bypassed); fall through with raw issue body in that case.
+  const baExpansion = await fetchBAExpansion(product_id, issue.number);
+  log({ msg: "ba_expansion lookup", present: Boolean(baExpansion) });
+
   // ---- run the estimator ------------------------------------------------
   let estimatorOutput: Awaited<ReturnType<typeof runEstimator>>;
   try {
-    estimatorOutput = await runEstimator(issue, product_id);
+    estimatorOutput = await runEstimator(issue, product_id, baExpansion);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log({ msg: "estimator threw; parking", error: msg });
