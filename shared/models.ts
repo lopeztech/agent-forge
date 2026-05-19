@@ -25,12 +25,18 @@ export type RoleKey =
 
 export type ModelTier = "opus-4-7" | "sonnet-4-6" | "haiku-4-5";
 
-// Bedrock InvokeModel SKUs in eu-west-1. Verify against the AWS Bedrock
-// console before relying on these — model IDs lag the Anthropic catalog.
+// Bedrock InvokeModel IDs. v1 ships in eu-west-1, where newer Claude SKUs
+// (Haiku 4.5 confirmed; Sonnet 4.6 / Opus 4.7 by extension) are
+// INFERENCE_PROFILE-only — direct `ON_DEMAND` invocation against the
+// foundation-model ID returns "model not supported for on-demand throughput".
+// We use the EU geographic cross-region inference profile so requests stay
+// within EU regions (eu-west-1, eu-west-3, eu-north-1, eu-central-1, eu-south-1,
+// eu-south-2). IAM needs grants on both the profile ARN AND every underlying
+// foundation-model ARN the profile can fan out to — see infra/envs/dev/cost-gate.tf.
 export const BEDROCK_MODEL_IDS: Record<ModelTier, string> = {
-  "opus-4-7": "anthropic.claude-opus-4-7-v1:0",
-  "sonnet-4-6": "anthropic.claude-sonnet-4-6-v1:0",
-  "haiku-4-5": "anthropic.claude-haiku-4-5-20251001-v1:0",
+  "opus-4-7": "eu.anthropic.claude-opus-4-7-v1:0",
+  "sonnet-4-6": "eu.anthropic.claude-sonnet-4-6-v1:0",
+  "haiku-4-5": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
 };
 
 // USD per 1M tokens (Bedrock eu-west-1, early 2026 estimates from CLAUDE.md).
