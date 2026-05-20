@@ -40,6 +40,7 @@ import { addLabels, postComment, transitionLabel } from "../../../shared/github/
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
 import {
   type ContentBlock,
+  type SystemBlock,
   costUsd,
   getModelByTier,
 } from "../../../shared/models.ts";
@@ -241,16 +242,23 @@ You MUST call the submit_expansion tool exactly once. Do not produce any
 free-form text response.
 `.trim();
 
-function buildSystemPrompt(spec: SpecReadResult): string {
+// System prompt is split into two cache-controlled blocks so Anthropic can
+// reuse the prefix across BA calls within the 5-min ephemeral TTL.
+//
+//   block 1: BASE_SYSTEM_PROMPT — stable across products
+//   block 2: spec/ contents     — stable across issues for one product
+//
+// Minimum cached prefix is 1024 tokens. The base alone (~700 tokens) is below
+// that threshold, so when spec is missing we drop caching entirely and pass a
+// single uncached block. When spec is present (~5+ KB), the combined prefix
+// easily clears the threshold and gets cached.
+function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
   if (spec.missing || spec.files.length === 0) {
-    return BASE_SYSTEM_PROMPT;
+    return [{ type: "text", text: BASE_SYSTEM_PROMPT }];
   }
 
   const specBlocks = spec.files
-    .map(
-      (f) =>
-        `<file path="${f.path}">\n${f.content.trim()}\n</file>`,
-    )
+    .map((f) => `<file path="${f.path}">\n${f.content.trim()}\n</file>`)
     .join("\n\n");
 
   const truncationNote = spec.truncated_by
@@ -259,9 +267,7 @@ function buildSystemPrompt(spec: SpecReadResult): string {
       `Work from what's here.`
     : "";
 
-  return [
-    BASE_SYSTEM_PROMPT,
-    "",
+  const specBlockText = [
     "=====================",
     "PRODUCT SPECIFICATION",
     "=====================",
@@ -269,11 +275,24 @@ function buildSystemPrompt(spec: SpecReadResult): string {
     "authoritative source for product scope, conventions, and constraints.",
     "When relevant, reference specific spec sections or file paths in your",
     "acceptance criteria, risks, or out-of-scope notes. If the issue and",
-    "spec conflict, surface that as a risk.",
+    "spec conflict, surface that via the spec_conflict tool field.",
     "",
     specBlocks,
     truncationNote,
   ].join("\n");
+
+  return [
+    {
+      type: "text",
+      text: BASE_SYSTEM_PROMPT,
+      cache_control: { type: "ephemeral" },
+    },
+    {
+      type: "text",
+      text: specBlockText,
+      cache_control: { type: "ephemeral" },
+    },
+  ];
 }
 
 async function runBA(
@@ -291,7 +310,7 @@ async function runBA(
     `Issue #${issue.number}: ${issue.title}\n\n---\n\n${issue.body ?? "(no body)"}`;
 
   const result = await model.invoke({
-    system: buildSystemPrompt(spec),
+    system: buildSystemBlocks(spec),
     messages: [{ role: "user", content: userMessage }],
     maxTokens: 2048,
     tools: [SUBMIT_EXPANSION_TOOL],
