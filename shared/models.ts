@@ -110,8 +110,19 @@ export type ToolDefinition = {
   input_schema: Record<string, unknown>;
 };
 
+// System block with optional cache_control. When `cache_control` is set on a
+// block, Anthropic creates a cache breakpoint at the end of that block: the
+// prefix up to and including that block is cached and reused on subsequent
+// calls within the TTL (5 min for `ephemeral`). Minimum cached prefix is 1024
+// tokens (Sonnet/Haiku) — blocks below that threshold are silently uncached.
+export type SystemBlock = {
+  type: "text";
+  text: string;
+  cache_control?: { type: "ephemeral" };
+};
+
 export type InvokeOptions = {
-  system?: string;
+  system?: string | SystemBlock[];
   messages: ChatMessage[];
   maxTokens: number;
   tools?: ToolDefinition[];
