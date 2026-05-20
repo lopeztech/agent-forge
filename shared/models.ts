@@ -23,29 +23,35 @@ export type RoleKey =
   | "security"
   | "po";
 
-export type ModelTier = "opus-4-7" | "sonnet-4-6" | "haiku-4-5";
+// Opus 4.7 is the aspirational top-tier per CLAUDE.md but is gated behind an
+// AWS Sales conversation for new accounts (observed 2026-05-20 on the dev
+// account). Until that's resolved, the codebase uses Opus 4.6 — same shape,
+// roughly equivalent pricing — as the "best available Opus". Promoting to
+// 4.7 is a one-line change here + in infra/envs/dev/bedrock-models.tf.
+export type ModelTier = "opus-4-6" | "sonnet-4-6" | "haiku-4-5";
 
 // Bedrock InvokeModel IDs. v1 ships in eu-west-1, where newer Claude SKUs
-// (Haiku 4.5 confirmed; Sonnet 4.6 / Opus 4.7 by extension) are
-// INFERENCE_PROFILE-only — direct `ON_DEMAND` invocation against the
+// are INFERENCE_PROFILE-only — direct `ON_DEMAND` invocation against the
 // foundation-model ID returns "model not supported for on-demand throughput".
 // We use the EU geographic cross-region inference profile so requests stay
 // within EU regions (eu-west-1, eu-west-3, eu-north-1, eu-central-1, eu-south-1,
 // eu-south-2). IAM needs grants on both the profile ARN AND every underlying
-// foundation-model ARN the profile can fan out to — see infra/envs/dev/cost-gate.tf.
+// foundation-model ARN the profile can fan out to — see infra/envs/dev/bedrock-models.tf.
 export const BEDROCK_MODEL_IDS: Record<ModelTier, string> = {
-  "opus-4-7": "eu.anthropic.claude-opus-4-7",
+  "opus-4-6": "eu.anthropic.claude-opus-4-6-v1",
   "sonnet-4-6": "eu.anthropic.claude-sonnet-4-6",
   "haiku-4-5": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
 };
 
 // USD per 1M tokens (Bedrock eu-west-1, early 2026 estimates from CLAUDE.md).
 // Cached input is 10% of normal input per Anthropic's prompt-caching pricing.
+// Opus 4.6 pricing matches Opus 4.7 list pricing — verify against the Bedrock
+// pricing page if the budget envelope tightens.
 export const PRICING: Record<
   ModelTier,
   { inputPerM: number; outputPerM: number }
 > = {
-  "opus-4-7": { inputPerM: 15, outputPerM: 75 },
+  "opus-4-6": { inputPerM: 15, outputPerM: 75 },
   "sonnet-4-6": { inputPerM: 3, outputPerM: 15 },
   "haiku-4-5": { inputPerM: 1, outputPerM: 5 },
 };
@@ -72,11 +78,11 @@ export function defaultTier(role: RoleKey, attempt: number = 1): ModelTier {
     case "cost-estimator":
       return "haiku-4-5";
     case "po":
-      return "opus-4-7";
+      return "opus-4-6";
     case "dev":
       // Sonnet on attempts 1..(cap-1), Opus on the final attempt.
       // Default kickback cap is 3 → attempt 3 escalates.
-      return attempt >= 3 ? "opus-4-7" : "sonnet-4-6";
+      return attempt >= 3 ? "opus-4-6" : "sonnet-4-6";
     case "ba":
     case "test":
     case "functional":
