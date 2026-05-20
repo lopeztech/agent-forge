@@ -36,7 +36,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
-import { postComment, transitionLabel } from "../../../shared/github/repo.ts";
+import { addLabels, postComment, transitionLabel } from "../../../shared/github/repo.ts";
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
 import {
   type ContentBlock,
@@ -113,12 +113,18 @@ type GitHubIssue = {
 
 type Complexity = "trivial" | "small" | "medium" | "large";
 
+type SpecConflict = {
+  detected: boolean;
+  reason: string;
+};
+
 type BAExpansion = {
   acceptance_criteria: string[];
   risks: string[];
   out_of_scope: string[];
   complexity: Complexity;
   rationale: string;
+  spec_conflict: SpecConflict;
 };
 
 // ---------------------------------------------------------------------------
@@ -129,8 +135,8 @@ const SUBMIT_EXPANSION_TOOL = {
   name: "submit_expansion",
   description:
     "Submit the structured expansion of this issue: acceptance criteria, " +
-    "risks, out-of-scope notes, and a complexity tag. You MUST call this " +
-    "exactly once. Do not produce any free-form text.",
+    "risks, out-of-scope notes, a complexity tag, and a spec-conflict flag. " +
+    "You MUST call this exactly once. Do not produce any free-form text.",
   input_schema: {
     type: "object",
     additionalProperties: false,
@@ -140,6 +146,7 @@ const SUBMIT_EXPANSION_TOOL = {
       "out_of_scope",
       "complexity",
       "rationale",
+      "spec_conflict",
     ],
     properties: {
       acceptance_criteria: {
@@ -180,6 +187,26 @@ const SUBMIT_EXPANSION_TOOL = {
           "1-3 sentences explaining the expansion — primary driver of " +
           "complexity, why these specific risks matter, anything else worth noting.",
       },
+      spec_conflict: {
+        type: "object",
+        additionalProperties: false,
+        required: ["detected", "reason"],
+        properties: {
+          detected: {
+            type: "boolean",
+            description:
+              "True if the issue directly contradicts the product spec — " +
+              "especially anything explicitly listed in non-goals or " +
+              "ruled out elsewhere in spec/. False otherwise.",
+          },
+          reason: {
+            type: "string",
+            description:
+              "When detected=true: the verbatim spec text + a one-sentence " +
+              "statement of the contradiction. Empty string when detected=false.",
+          },
+        },
+      },
     },
   },
 };
@@ -200,6 +227,15 @@ do not commit to a design. Your job is purely to clarify scope:
 Be concise — short bullet points, not paragraphs. Prefer concrete, testable
 statements over abstract ones. If the issue body already gives some of these,
 preserve them and fill gaps; don't restate them verbatim.
+
+**Spec conflict handling.** If the issue proposes work that directly
+contradicts the product spec (especially anything in non-goals or explicitly
+ruled out elsewhere in spec/), set spec_conflict.detected=true with reason
+containing the verbatim conflicting spec text plus a one-sentence statement
+of the contradiction. This pauses the pipeline for human resolution rather
+than letting downstream estimate and implement forbidden work. Do not set
+detected=true for soft tensions, nuanced trade-offs, or anything the spec
+merely doesn't address — only for clear, citable contradictions.
 
 You MUST call the submit_expansion tool exactly once. Do not produce any
 free-form text response.
@@ -353,9 +389,23 @@ function buildComment(
   modelId: string,
   runId: string,
 ): string {
+  const conflicted = expansion.spec_conflict.detected;
+  const transitionLine = conflicted
+    ? `**⚠️  Spec conflict detected — parking at \`human-needed\`.** Pipeline does NOT proceed to estimation or development. A human must resolve the conflict (revise the issue, amend the spec, or close as won't-do) and clear the \`human-needed\` label.`
+    : `Transitioning \`state:idea\` → \`state:cost-estimating\`.`;
+
+  const conflictBlock = conflicted
+    ? [
+        "### Spec conflict",
+        "> " + expansion.spec_conflict.reason.replace(/\n/g, "\n> "),
+        "",
+      ]
+    : [];
+
   return [
     `## BA expansion (run \`${runId}\`, ${modelId})`,
     "",
+    ...conflictBlock,
     `**Complexity:** \`${expansion.complexity}\``,
     "",
     `### Acceptance criteria`,
@@ -369,7 +419,7 @@ function buildComment(
     "",
     `_${expansion.rationale}_`,
     "",
-    `Transitioning \`state:idea\` → \`state:cost-estimating\`.`,
+    transitionLine,
     "",
     fmtSpecFooter(spec, specPath),
   ].join("\n");
@@ -488,14 +538,18 @@ async function main(): Promise<void> {
   );
   log({ msg: "posted expansion comment" });
 
-  await transitionLabel(
-    { token, userAgent: USER_AGENT },
-    REPO,
-    ISSUE_NUMBER,
-    "state:idea",
-    "state:cost-estimating",
-  );
-  log({ msg: "label transitioned", from: "state:idea", to: "state:cost-estimating" });
+  const ghOpts = { token, userAgent: USER_AGENT };
+  if (expansion.spec_conflict.detected) {
+    await transitionLabel(ghOpts, REPO, ISSUE_NUMBER, "state:idea", "human-needed");
+    await addLabels(ghOpts, REPO, ISSUE_NUMBER, ["gap:spec-conflict"]);
+    log({
+      msg: "spec conflict detected; parked at human-needed",
+      reason: expansion.spec_conflict.reason,
+    });
+  } else {
+    await transitionLabel(ghOpts, REPO, ISSUE_NUMBER, "state:idea", "state:cost-estimating");
+    log({ msg: "label transitioned", from: "state:idea", to: "state:cost-estimating" });
+  }
 
   await recordSpend({
     tableName: BUDGET_LEDGER_TABLE,
