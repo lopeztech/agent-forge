@@ -24,10 +24,13 @@ locals {
   ]
 
   # Keep these in sync with shared/models.ts BEDROCK_MODEL_IDS.
+  # opus-4-7 is gated behind an AWS Sales conversation for new accounts
+  # (observed 2026-05-20); using opus-4-6 as best-available Opus. Promote
+  # to 4-7 here and in shared/models.ts once Sales unlocks it.
   bedrock_profile_ids = {
     "haiku-4-5"  = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
     "sonnet-4-6" = "eu.anthropic.claude-sonnet-4-6"
-    "opus-4-7"   = "eu.anthropic.claude-opus-4-7"
+    "opus-4-6"   = "eu.anthropic.claude-opus-4-6-v1"
   }
 
   # The foundation-model IDs are the profile ID with the `eu.` prefix stripped.
