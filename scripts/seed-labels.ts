@@ -59,6 +59,7 @@ const LABEL_VOCABULARY: Label[] = [
   // Failure / human-attention
   { name: "human-needed", color: "b60205", description: "Parked: a human must clear this before the workflow resumes" },
   { name: "gap:areas-incomplete", color: "b60205", description: "Issue paths aren't covered by .agent-forge/areas.yml; needs human triage" },
+  { name: "gap:spec-conflict", color: "b60205", description: "BA detected a direct conflict with the product spec; needs human resolution" },
 
   // Tech debt & flags
   { name: "tech-debt", color: "fef2c0", description: "Filed by a Dev for follow-up; BA picks up nightly" },
