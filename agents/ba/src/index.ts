@@ -63,17 +63,12 @@ const ISSUE_NUMBER = Number(required("AGENT_FORGE_ISSUE_NUMBER"));
 const REPO = required("AGENT_FORGE_REPO");
 const APP_SECRET_NAME = required("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = required("AGENT_FORGE_PRODUCTS_TABLE");
+const ISSUE_STATE_TABLE = required("AGENT_FORGE_ISSUE_STATE_TABLE");
+const BUDGET_LEDGER_TABLE = required("AGENT_FORGE_BUDGET_LEDGER_TABLE");
 const ROLE = required("AGENT_FORGE_ROLE");
 const ENV = required("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
 const LABEL = process.env.AGENT_FORGE_LABEL ?? "unknown";
-
-// Table names derived from name_prefix. The cost-estimator Lambda receives
-// these as explicit env vars; the BA still derives. Normalising both is
-// a follow-up cleanup.
-const NAME_PREFIX = `agent-forge-${ENV}`;
-const ISSUE_STATE_TABLE = `${NAME_PREFIX}-issue_state`;
-const BUDGET_LEDGER_TABLE = `${NAME_PREFIX}-budget_ledger`;
 
 const USER_AGENT = `agent-forge-${ROLE}`;
 

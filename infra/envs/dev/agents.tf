@@ -64,6 +64,11 @@ module "agent_ba" {
 
   products_table_name = module.dynamodb.table_names["products"]
 
+  extra_environment = {
+    AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
+    AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+  }
+
   # BA needs read on products (issue trigger lookup) and write on
   # budget_ledger + issue_state + team_memory + area_locks.
   dynamodb_table_arns = {

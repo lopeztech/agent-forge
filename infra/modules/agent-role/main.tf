@@ -159,12 +159,20 @@ resource "aws_ecs_task_definition" "this" {
       image     = var.image_uri
       essential = true
 
-      environment = [
-        { name = "AGENT_FORGE_ENV", value = var.env },
-        { name = "AGENT_FORGE_ROLE", value = var.role },
-        { name = "AGENT_FORGE_APP_SECRET_NAME", value = var.app_secret_name },
-        { name = "AGENT_FORGE_PRODUCTS_TABLE", value = var.products_table_name },
-      ]
+      environment = concat(
+        [
+          { name = "AGENT_FORGE_ENV", value = var.env },
+          { name = "AGENT_FORGE_ROLE", value = var.role },
+          { name = "AGENT_FORGE_APP_SECRET_NAME", value = var.app_secret_name },
+          { name = "AGENT_FORGE_PRODUCTS_TABLE", value = var.products_table_name },
+        ],
+        [
+          for name, value in var.extra_environment : {
+            name  = name
+            value = value
+          }
+        ],
+      )
 
       logConfiguration = {
         logDriver = "awslogs"

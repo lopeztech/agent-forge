@@ -86,3 +86,9 @@ variable "products_table_name" {
   type        = string
   description = "Name of the products DynamoDB table — passed to the container as AGENT_FORGE_PRODUCTS_TABLE."
 }
+
+variable "extra_environment" {
+  type        = map(string)
+  description = "Additional static environment variables to inject into the agent container."
+  default     = {}
+}
