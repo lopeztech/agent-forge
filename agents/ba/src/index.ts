@@ -27,7 +27,13 @@
 //   - Opus 4.7 escalation for brand-new spec hydration
 
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
-import { addLabels, postComment, transitionLabel } from "../../../shared/github/repo.ts";
+import {
+  addLabels,
+  getIssue,
+  postComment,
+  transitionLabel,
+  type GitHubIssue,
+} from "../../../shared/github/repo.ts";
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
 import {
   type ContentBlock,
@@ -92,13 +98,6 @@ function log(obj: Record<string, unknown>): void {
 // ---------------------------------------------------------------------------
 
 type ProductRow = ProductConfig;
-
-type GitHubIssue = {
-  number: number;
-  title: string;
-  body: string | null;
-  state: string;
-};
 
 type Complexity = "trivial" | "small" | "medium" | "large";
 
@@ -337,24 +336,7 @@ async function runBA(
 // ---------------------------------------------------------------------------
 
 async function fetchIssue(token: string): Promise<GitHubIssue> {
-  const r = await fetch(
-    `https://api.github.com/repos/${REPO}/issues/${ISSUE_NUMBER}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": USER_AGENT,
-      },
-    },
-  );
-  if (!r.ok) {
-    throw new Error(
-      `GET /repos/${REPO}/issues/${ISSUE_NUMBER} failed: ${r.status} ${r.statusText}`,
-    );
-  }
-  const data = (await r.json()) as GitHubIssue;
-  return data;
+  return getIssue({ token, userAgent: USER_AGENT }, REPO, ISSUE_NUMBER);
 }
 
 async function fetchProductRow(): Promise<ProductRow> {
