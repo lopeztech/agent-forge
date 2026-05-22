@@ -32,7 +32,6 @@ import {
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
@@ -45,6 +44,7 @@ import {
   getModelByTier,
 } from "../../../shared/models.ts";
 import { recordSpend } from "../../../shared/budget.ts";
+import { putBAExpansion } from "../../../shared/state/issue-state.ts";
 
 // ---------------------------------------------------------------------------
 // Env
@@ -455,28 +455,23 @@ async function writeIssueState(args: {
   model_id: string;
   run_id: string;
 }): Promise<void> {
-  await ddb.send(
-    new PutCommand({
-      TableName: ISSUE_STATE_TABLE,
-      Item: {
-        product_id: PRODUCT_ID,
-        issue_id: String(ISSUE_NUMBER),
-        ba_expansion: {
-          ...args.expansion,
-          model: args.model_id,
-          run_id: args.run_id,
-          spec: {
-            path: args.spec_path,
-            files: args.spec.files.length,
-            total_bytes: args.spec.total_bytes,
-            truncated_by: args.spec.truncated_by,
-            missing: args.spec.missing,
-          },
-        },
-        updated_at: new Date().toISOString(),
+  await putBAExpansion({
+    tableName: ISSUE_STATE_TABLE,
+    productId: PRODUCT_ID,
+    issueNumber: ISSUE_NUMBER,
+    expansion: {
+      ...args.expansion,
+      model: args.model_id,
+      run_id: args.run_id,
+      spec: {
+        path: args.spec_path,
+        files: args.spec.files.length,
+        total_bytes: args.spec.total_bytes,
+        truncated_by: args.spec.truncated_by,
+        missing: args.spec.missing,
       },
-    }),
-  );
+    },
+  });
 }
 
 function runIdFromEnv(): string {
