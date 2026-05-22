@@ -23,7 +23,7 @@
 //     but couldn't be acted on — human should look)
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import { postComment, transitionLabel } from "../../../../shared/github/repo.ts";
@@ -34,6 +34,10 @@ import {
   getModelByTier,
 } from "../../../../shared/models.ts";
 import { recordSpend } from "../../../../shared/budget.ts";
+import {
+  getIssueState,
+  putCostEstimate,
+} from "../../../../shared/state/issue-state.ts";
 
 // ---------------------------------------------------------------------------
 // Env + clients
@@ -390,14 +394,12 @@ async function fetchBAExpansion(
   issue_number: number,
 ): Promise<BAExpansionSummary | undefined> {
   try {
-    const r = await ddb.send(
-      new GetCommand({
-        TableName: ISSUE_STATE_TABLE,
-        Key: { product_id, issue_id: String(issue_number) },
-        ProjectionExpression: "ba_expansion",
-      }),
-    );
-    return (r.Item?.ba_expansion as BAExpansionSummary | undefined) ?? undefined;
+    const state = await getIssueState({
+      tableName: ISSUE_STATE_TABLE,
+      productId: product_id,
+      issueNumber: issue_number,
+    });
+    return state?.ba_expansion as BAExpansionSummary | undefined;
   } catch (err) {
     // Best-effort: never let a state-lookup failure block the estimator.
     log({
@@ -419,27 +421,22 @@ async function writeIssueState(args: {
   run_id: string;
   posted_comment_id: number | undefined;
 }): Promise<void> {
-  await ddb.send(
-    new PutCommand({
-      TableName: ISSUE_STATE_TABLE,
-      Item: {
-        product_id: args.product_id,
-        issue_id: String(args.issue_number),
-        estimate: {
-          per_role: args.estimate.per_role,
-          rationale: args.estimate.rationale,
-          p50_total_usd: args.totals.p50_total_usd,
-          p90_total_usd: args.totals.p90_total_usd,
-          threshold_usd: args.threshold_usd,
-          decision: args.decision.kind,
-          model: args.model_id,
-          run_id: args.run_id,
-          posted_comment_id: args.posted_comment_id ?? null,
-        },
-        updated_at: new Date().toISOString(),
-      },
-    }),
-  );
+  await putCostEstimate({
+    tableName: ISSUE_STATE_TABLE,
+    productId: args.product_id,
+    issueNumber: args.issue_number,
+    estimate: {
+      per_role: args.estimate.per_role,
+      rationale: args.estimate.rationale,
+      p50_total_usd: args.totals.p50_total_usd,
+      p90_total_usd: args.totals.p90_total_usd,
+      threshold_usd: args.threshold_usd,
+      decision: args.decision.kind,
+      model: args.model_id,
+      run_id: args.run_id,
+      posted_comment_id: args.posted_comment_id ?? null,
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
