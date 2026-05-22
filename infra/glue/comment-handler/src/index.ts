@@ -14,9 +14,6 @@
 // Anything else (no slash command, wrong author, wrong issue state) is a
 // silent no-op with a structured log line.
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
-
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import { postComment, transitionLabel } from "../../../../shared/github/repo.ts";
 import {
@@ -24,8 +21,12 @@ import {
   TERMINAL_STATE_LABELS,
   isStateLabel,
 } from "../../../../shared/labels.ts";
+import {
+  requireProduct,
+  requireWriterInstallId,
+  type ProductConfig,
+} from "../../../../shared/state/products.ts";
 
-const REGION = process.env.AWS_REGION ?? "eu-west-1";
 const PRODUCTS_TABLE = required("PRODUCTS_TABLE");
 const APP_SECRET_NAME = required("APP_SECRET_NAME");
 const USER_AGENT = "agent-forge-comment-handler";
@@ -35,8 +36,6 @@ function required(name: string): string {
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
 }
-
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ---------------------------------------------------------------------------
 // EventBridge event shape
@@ -66,10 +65,7 @@ type EventBridgeEvent = {
   };
 };
 
-type ProductRow = {
-  product_id: string;
-  writer_install_id?: string;
-};
+type ProductRow = ProductConfig;
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -106,11 +102,10 @@ function hasLabel(labels: Array<{ name: string }>, name: string): boolean {
 // ---------------------------------------------------------------------------
 
 async function fetchProductRow(product_id: string): Promise<ProductRow> {
-  const r = await ddb.send(
-    new GetCommand({ TableName: PRODUCTS_TABLE, Key: { product_id } }),
-  );
-  if (!r.Item) throw new Error(`No products row for product_id=${product_id}`);
-  return r.Item as ProductRow;
+  return requireProduct({
+    tableName: PRODUCTS_TABLE,
+    productId: product_id,
+  });
 }
 
 export async function handler(event: EventBridgeEvent): Promise<void> {
@@ -172,12 +167,10 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
   }
 
   const product = await fetchProductRow(product_id);
-  if (!product.writer_install_id) {
-    throw new Error(`products[${product_id}] has no writer_install_id`);
-  }
+  const writerInstallId = requireWriterInstallId(product);
   const { token } = await getInstallationTokenFromSecret(
     APP_SECRET_NAME,
-    product.writer_install_id,
+    writerInstallId,
   );
 
   const opts = { token, userAgent: USER_AGENT };

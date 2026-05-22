@@ -26,14 +26,6 @@
 //   - team_memory read/write
 //   - Opus 4.7 escalation for brand-new spec hydration
 
-import {
-  DynamoDBClient,
-} from "@aws-sdk/client-dynamodb";
-import {
-  DynamoDBDocumentClient,
-  GetCommand,
-} from "@aws-sdk/lib-dynamodb";
-
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { addLabels, postComment, transitionLabel } from "../../../shared/github/repo.ts";
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
@@ -50,12 +42,15 @@ import {
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
 } from "../../../shared/labels.ts";
+import {
+  requireProduct,
+  requireWriterInstallId,
+  type ProductConfig,
+} from "../../../shared/state/products.ts";
 
 // ---------------------------------------------------------------------------
 // Env
 // ---------------------------------------------------------------------------
-
-const REGION = process.env.AWS_REGION ?? "eu-west-1";
 
 function required(name: string): string {
   const v = process.env[name];
@@ -82,8 +77,6 @@ const BUDGET_LEDGER_TABLE = `${NAME_PREFIX}-budget_ledger`;
 
 const USER_AGENT = `agent-forge-${ROLE}`;
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
-
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------
@@ -103,12 +96,7 @@ function log(obj: Record<string, unknown>): void {
 // Types
 // ---------------------------------------------------------------------------
 
-type ProductRow = {
-  product_id: string;
-  repo_full_name: string;
-  writer_install_id?: string;
-  spec_path?: string;
-};
+type ProductRow = ProductConfig;
 
 type GitHubIssue = {
   number: number;
@@ -375,14 +363,10 @@ async function fetchIssue(token: string): Promise<GitHubIssue> {
 }
 
 async function fetchProductRow(): Promise<ProductRow> {
-  const r = await ddb.send(
-    new GetCommand({
-      TableName: PRODUCTS_TABLE,
-      Key: { product_id: PRODUCT_ID },
-    }),
-  );
-  if (!r.Item) throw new Error(`No products row for product_id=${PRODUCT_ID}`);
-  return r.Item as ProductRow;
+  return requireProduct({
+    tableName: PRODUCTS_TABLE,
+    productId: PRODUCT_ID,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -502,13 +486,11 @@ async function main(): Promise<void> {
   }
 
   const product = await fetchProductRow();
-  if (!product.writer_install_id) {
-    throw new Error(`products[${PRODUCT_ID}] has no writer_install_id`);
-  }
+  const writerInstallId = requireWriterInstallId(product);
 
   const { token } = await getInstallationTokenFromSecret(
     APP_SECRET_NAME,
-    product.writer_install_id,
+    writerInstallId,
   );
   log({ msg: "minted installation token" });
 

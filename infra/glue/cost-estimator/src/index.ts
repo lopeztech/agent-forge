@@ -22,9 +22,6 @@
 //   - Any GitHub or DDB call fails after the model call (estimate was made
 //     but couldn't be acted on — human should look)
 
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
-
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import { postComment, transitionLabel } from "../../../../shared/github/repo.ts";
 import {
@@ -42,12 +39,16 @@ import {
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
 } from "../../../../shared/labels.ts";
+import {
+  requireProduct,
+  requireWriterInstallId,
+  type ProductConfig,
+} from "../../../../shared/state/products.ts";
 
 // ---------------------------------------------------------------------------
 // Env + clients
 // ---------------------------------------------------------------------------
 
-const REGION = process.env.AWS_REGION ?? "eu-west-1";
 const PRODUCTS_TABLE = required("PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = required("ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = required("BUDGET_LEDGER_TABLE");
@@ -65,8 +66,6 @@ function required(name: string): string {
   if (!v) throw new Error(`Missing required env var: ${name}`);
   return v;
 }
-
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 
 // ---------------------------------------------------------------------------
 // EventBridge event shape
@@ -86,12 +85,7 @@ type EventBridgeEvent = {
   };
 };
 
-type ProductRow = {
-  product_id: string;
-  repo_full_name: string;
-  writer_install_id?: string;
-  cost_approval_threshold_usd?: number;
-};
+type ProductRow = ProductConfig;
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -389,11 +383,10 @@ function buildComment(
 // ---------------------------------------------------------------------------
 
 async function fetchProductRow(product_id: string): Promise<ProductRow> {
-  const r = await ddb.send(
-    new GetCommand({ TableName: PRODUCTS_TABLE, Key: { product_id } }),
-  );
-  if (!r.Item) throw new Error(`No products row for product_id=${product_id}`);
-  return r.Item as ProductRow;
+  return requireProduct({
+    tableName: PRODUCTS_TABLE,
+    productId: product_id,
+  });
 }
 
 async function fetchBAExpansion(
@@ -500,15 +493,13 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
   }
 
   const product = await fetchProductRow(product_id);
-  if (!product.writer_install_id) {
-    throw new Error(`products[${product_id}] has no writer_install_id`);
-  }
+  const writerInstallId = requireWriterInstallId(product);
   const threshold_usd =
     product.cost_approval_threshold_usd ?? DEFAULT_THRESHOLD_USD;
 
   const { token } = await getInstallationTokenFromSecret(
     APP_SECRET_NAME,
-    product.writer_install_id,
+    writerInstallId,
   );
 
   // ---- read BA expansion if BA wrote one --------------------------------

@@ -15,12 +15,12 @@ import {
   SecretsManagerClient,
   GetSecretValueCommand,
 } from "@aws-sdk/client-secrets-manager";
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   EventBridgeClient,
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
+
+import { resolveProductByRepo } from "../../../../shared/state/products.ts";
 
 type APIGatewayProxyEventV2 = {
   body?: string;
@@ -48,7 +48,6 @@ function required(name: string): string {
 }
 
 const sm = new SecretsManagerClient({ region: REGION });
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 const eb = new EventBridgeClient({ region: REGION });
 
 // Cache the signing secret across warm invocations. Re-fetched only on
@@ -100,17 +99,12 @@ function verifySignature(body: Buffer, signature: string, secret: string): boole
 async function resolveProductId(
   repoFullName: string,
 ): Promise<string | undefined> {
-  const r = await ddb.send(
-    new QueryCommand({
-      TableName: PRODUCTS_TABLE,
-      IndexName: REPO_INDEX_NAME,
-      KeyConditionExpression: "repo_full_name = :r",
-      ExpressionAttributeValues: { ":r": repoFullName },
-      Limit: 1,
-    }),
-  );
-  const item = r.Items?.[0];
-  return item ? (item.product_id as string) : undefined;
+  const product = await resolveProductByRepo({
+    tableName: PRODUCTS_TABLE,
+    repoIndexName: REPO_INDEX_NAME,
+    repoFullName,
+  });
+  return product?.product_id;
 }
 
 export async function handler(
