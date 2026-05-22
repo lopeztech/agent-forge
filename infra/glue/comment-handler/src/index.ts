@@ -19,6 +19,11 @@ import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import { postComment, transitionLabel } from "../../../../shared/github/repo.ts";
+import {
+  STATE_LABELS,
+  TERMINAL_STATE_LABELS,
+  isStateLabel,
+} from "../../../../shared/labels.ts";
 
 const REGION = process.env.AWS_REGION ?? "eu-west-1";
 const PRODUCTS_TABLE = required("PRODUCTS_TABLE");
@@ -96,8 +101,6 @@ function hasLabel(labels: Array<{ name: string }>, name: string): boolean {
 }
 
 // Terminal states a /cancel must not touch.
-const TERMINAL_LABELS = new Set(["state:done", "state:cancelled"]);
-
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -154,12 +157,14 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
 
   // Validate state before doing anything externally visible.
   if (command === "approve-cost") {
-    if (!hasLabel(labels, "state:awaiting-cost-approval")) {
+    if (!hasLabel(labels, STATE_LABELS.awaitingCostApproval)) {
       log({ msg: "/approve-cost on wrong state; ignoring" });
       return;
     }
   } else if (command === "cancel") {
-    const hasTerminal = labels.some((l) => TERMINAL_LABELS.has(l.name));
+    const hasTerminal = labels.some(
+      (l) => isStateLabel(l.name) && TERMINAL_STATE_LABELS.has(l.name),
+    );
     if (hasTerminal) {
       log({ msg: "/cancel on terminal state; ignoring" });
       return;
@@ -182,8 +187,8 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
       opts,
       repo,
       issueNumber,
-      "state:awaiting-cost-approval",
-      "state:ready",
+      STATE_LABELS.awaitingCostApproval,
+      STATE_LABELS.ready,
     );
     await postComment(
       opts,
@@ -196,14 +201,14 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
   }
 
   // /cancel — strip whichever state:* label is present and add state:cancelled.
-  const currentStateLabel = labels.find((l) => l.name.startsWith("state:"));
+  const currentStateLabel = labels.find((l) => isStateLabel(l.name));
   if (currentStateLabel) {
     await transitionLabel(
       opts,
       repo,
       issueNumber,
       currentStateLabel.name,
-      "state:cancelled",
+      STATE_LABELS.cancelled,
     );
   } else {
     // No state: label at all — just add state:cancelled.
@@ -211,8 +216,8 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
       opts,
       repo,
       issueNumber,
-      "state:cancelled", // remove first is a no-op (404 swallowed)
-      "state:cancelled",
+      STATE_LABELS.cancelled, // remove first is a no-op (404 swallowed)
+      STATE_LABELS.cancelled,
     );
   }
   await postComment(

@@ -16,12 +16,10 @@ import {
   appSecretName,
   getInstallationTokenFromSecret,
 } from "../shared/github/auth.ts";
-
-type Label = {
-  name: string;
-  color: string; // 6-char hex, no #
-  description: string;
-};
+import {
+  LABEL_VOCABULARY,
+  type LabelDefinition,
+} from "../shared/labels.ts";
 
 // Color scheme:
 //   state:*           — blue family (cycle through shades by life-cycle phase)
@@ -32,41 +30,6 @@ type Label = {
 //   tech-debt:*       — yellow
 //   security-sensitive — purple
 //   complexity:high   — orange
-const LABEL_VOCABULARY: Label[] = [
-  // State machine — ordered by lifecycle phase
-  { name: "state:idea", color: "0e8a16", description: "BA hasn't picked this up yet" },
-  { name: "state:cost-estimating", color: "1d76db", description: "Cost Estimator Lambda is sizing this issue" },
-  { name: "state:awaiting-cost-approval", color: "fbca04", description: "Estimate above auto-approve threshold; needs /approve-cost from a maintainer" },
-  { name: "state:cancelled", color: "cccccc", description: "Maintainer ran /cancel; terminal" },
-  { name: "state:ready", color: "0052cc", description: "Backlog: a Dev will pick this up when capacity allows" },
-  { name: "state:in-dev", color: "1d76db", description: "A Dev is actively working this branch" },
-  { name: "state:awaiting-tests", color: "5319e7", description: "Dev finished; Test Engineer adds tests next" },
-  { name: "state:awaiting-functional", color: "5319e7", description: "Tests added; Functional Tester runs e2e flows next" },
-  { name: "state:awaiting-security", color: "5319e7", description: "Functional passed; Security Reviewer scans next" },
-  { name: "state:awaiting-po", color: "5319e7", description: "Security clean; PO decides ship/no-ship next" },
-  { name: "state:done", color: "0e8a16", description: "Merged. Terminal." },
-
-  // Iteration counters
-  { name: "iter:1", color: "ffaf2b", description: "First Dev attempt" },
-  { name: "iter:2", color: "ff6f1a", description: "Second Dev attempt (kicked back once)" },
-  { name: "iter:3", color: "ff4d00", description: "Final Dev attempt — runs on Opus" },
-
-  // Areas — populated dynamically per repo via .agent-forge/areas.yml.
-  // We pre-create only the generic catch-alls; concrete area:* labels are
-  // added by BA on the fly as it encounters them.
-  { name: "area:*", color: "cccccc", description: "Spans every declared area; equivalent to single-Dev for that issue" },
-
-  // Failure / human-attention
-  { name: "human-needed", color: "b60205", description: "Parked: a human must clear this before the workflow resumes" },
-  { name: "gap:areas-incomplete", color: "b60205", description: "Issue paths aren't covered by .agent-forge/areas.yml; needs human triage" },
-  { name: "gap:spec-conflict", color: "b60205", description: "BA detected a direct conflict with the product spec; needs human resolution" },
-
-  // Tech debt & flags
-  { name: "tech-debt", color: "fef2c0", description: "Filed by a Dev for follow-up; BA picks up nightly" },
-  { name: "security-sensitive", color: "5319e7", description: "Touches auth, crypto, payments, or PII; Security Reviewer escalates to Opus" },
-  { name: "complexity:high", color: "ff6f1a", description: "Cross-cutting / perf-sensitive / novel; Dev escalates to Opus on first attempt" },
-];
-
 type Args = {
   repo: string;
   install: string;
@@ -161,7 +124,7 @@ async function listExistingLabels(
 async function ensureLabel(
   token: string,
   repo: string,
-  label: Label,
+  label: LabelDefinition,
   existing: { color: string; description: string | null } | undefined,
 ): Promise<"created" | "updated" | "unchanged"> {
   if (!existing) {
