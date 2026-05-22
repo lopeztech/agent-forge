@@ -38,6 +38,10 @@ import {
   getIssueState,
   putCostEstimate,
 } from "../../../../shared/state/issue-state.ts";
+import {
+  HUMAN_NEEDED_LABEL,
+  STATE_LABELS,
+} from "../../../../shared/labels.ts";
 
 // ---------------------------------------------------------------------------
 // Env + clients
@@ -335,9 +339,12 @@ function fmtUsd(n: number): string {
 }
 
 type Decision =
-  | { kind: "auto-approved"; nextLabel: "state:ready" }
-  | { kind: "parked"; nextLabel: "state:awaiting-cost-approval" }
-  | { kind: "rejected-above-cap"; nextLabel: "human-needed" };
+  | { kind: "auto-approved"; nextLabel: typeof STATE_LABELS.ready }
+  | {
+      kind: "parked";
+      nextLabel: typeof STATE_LABELS.awaitingCostApproval;
+    }
+  | { kind: "rejected-above-cap"; nextLabel: typeof HUMAN_NEEDED_LABEL };
 
 function buildComment(
   estimate: Estimate,
@@ -459,8 +466,8 @@ async function parkAsFailure(
     { token, userAgent: USER_AGENT },
     repo,
     issueNumber,
-    "state:cost-estimating",
-    "human-needed",
+    STATE_LABELS.costEstimating,
+    HUMAN_NEEDED_LABEL,
   );
 }
 
@@ -487,7 +494,7 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
 
   // The EventBridge rule already filters on label.name=state:cost-estimating,
   // but defend against rule drift / replays.
-  if (label !== "state:cost-estimating") {
+  if (label !== STATE_LABELS.costEstimating) {
     log({ msg: "label is not state:cost-estimating; skipping", label });
     return;
   }
@@ -544,10 +551,13 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
   // ---- decide the gate --------------------------------------------------
   const decision: Decision =
     totals.p50_total_usd > HARD_PER_ISSUE_CAP_USD
-      ? { kind: "rejected-above-cap", nextLabel: "human-needed" }
+      ? { kind: "rejected-above-cap", nextLabel: HUMAN_NEEDED_LABEL }
       : totals.p50_total_usd <= threshold_usd
-        ? { kind: "auto-approved", nextLabel: "state:ready" }
-        : { kind: "parked", nextLabel: "state:awaiting-cost-approval" };
+        ? { kind: "auto-approved", nextLabel: STATE_LABELS.ready }
+        : {
+            kind: "parked",
+            nextLabel: STATE_LABELS.awaitingCostApproval,
+          };
 
   log({ msg: "decision", decision: decision.kind, p50_total_usd: totals.p50_total_usd, threshold_usd });
 
@@ -576,7 +586,7 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
       { token, userAgent: USER_AGENT },
       repo,
       issue.number,
-      "state:cost-estimating",
+      STATE_LABELS.costEstimating,
       decision.nextLabel,
     );
     log({ msg: "label transitioned", to: decision.nextLabel });

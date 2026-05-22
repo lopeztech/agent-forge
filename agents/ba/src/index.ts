@@ -45,6 +45,11 @@ import {
 } from "../../../shared/models.ts";
 import { recordSpend } from "../../../shared/budget.ts";
 import { putBAExpansion } from "../../../shared/state/issue-state.ts";
+import {
+  GAP_LABELS,
+  HUMAN_NEEDED_LABEL,
+  STATE_LABELS,
+} from "../../../shared/labels.ts";
 
 // ---------------------------------------------------------------------------
 // Env
@@ -411,7 +416,7 @@ function buildComment(
   const conflicted = expansion.spec_conflict.detected;
   const transitionLine = conflicted
     ? `**⚠️  Spec conflict detected — parking at \`human-needed\`.** Pipeline does NOT proceed to estimation or development. A human must resolve the conflict (revise the issue, amend the spec, or close as won't-do) and clear the \`human-needed\` label.`
-    : `Transitioning \`state:idea\` → \`state:cost-estimating\`.`;
+    : `Transitioning \`${STATE_LABELS.idea}\` → \`${STATE_LABELS.costEstimating}\`.`;
 
   const conflictBlock = conflicted
     ? [
@@ -491,7 +496,7 @@ function runIdFromEnv(): string {
 async function main(): Promise<void> {
   log({ msg: "starting", repo: REPO, label: LABEL });
 
-  if (LABEL && LABEL !== "state:idea") {
+  if (LABEL && LABEL !== STATE_LABELS.idea) {
     log({ msg: "non-state:idea label fired this run; nothing to do", label: LABEL });
     return;
   }
@@ -554,15 +559,31 @@ async function main(): Promise<void> {
 
   const ghOpts = { token, userAgent: USER_AGENT };
   if (expansion.spec_conflict.detected) {
-    await transitionLabel(ghOpts, REPO, ISSUE_NUMBER, "state:idea", "human-needed");
-    await addLabels(ghOpts, REPO, ISSUE_NUMBER, ["gap:spec-conflict"]);
+    await transitionLabel(
+      ghOpts,
+      REPO,
+      ISSUE_NUMBER,
+      STATE_LABELS.idea,
+      HUMAN_NEEDED_LABEL,
+    );
+    await addLabels(ghOpts, REPO, ISSUE_NUMBER, [GAP_LABELS.specConflict]);
     log({
       msg: "spec conflict detected; parked at human-needed",
       reason: expansion.spec_conflict.reason,
     });
   } else {
-    await transitionLabel(ghOpts, REPO, ISSUE_NUMBER, "state:idea", "state:cost-estimating");
-    log({ msg: "label transitioned", from: "state:idea", to: "state:cost-estimating" });
+    await transitionLabel(
+      ghOpts,
+      REPO,
+      ISSUE_NUMBER,
+      STATE_LABELS.idea,
+      STATE_LABELS.costEstimating,
+    );
+    log({
+      msg: "label transitioned",
+      from: STATE_LABELS.idea,
+      to: STATE_LABELS.costEstimating,
+    });
   }
 
   await recordSpend({
