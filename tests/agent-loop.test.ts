@@ -278,6 +278,65 @@ describe("runAgentLoop", () => {
     );
   });
 
+  it("honors result.terminate=false to keep the loop going even on a terminal tool", async () => {
+    const { handle, calls } = scriptedModel([
+      { stopReason: "tool_use", content: [toolUse("submit_done", { ok: false }, "1")] },
+      { stopReason: "tool_use", content: [toolUse("submit_done", { ok: true }, "2")] },
+      { stopReason: "end_turn", content: textOnly("done") },
+    ]);
+
+    let nthCall = 0;
+    const exec = async (call: { id: string; name: string; input: unknown }) => {
+      nthCall++;
+      // First submit_done: validation failed, agent should retry.
+      // Second submit_done: validation passed, terminate.
+      const ok = (call.input as { ok: boolean }).ok === true;
+      return {
+        tool_use_id: call.id,
+        content: ok ? "shipped" : "tests failed",
+        is_error: !ok,
+        terminate: ok,
+      };
+    };
+
+    const r = await runAgentLoop({
+      model: handle,
+      initialMessages: [{ role: "user", content: "go" }],
+      tools: [SUBMIT_TOOL],
+      executeTool: exec,
+      terminalTools: ["submit_done"],
+      maxTurns: 5,
+      maxTokensPerTurn: 100,
+    });
+
+    assert.equal(r.stopReason, "terminal_tool");
+    assert.equal(r.turns, 2, "first submit_done shouldn't end the loop");
+    assert.equal(calls.length, 2, "second model call should happen after the failed attempt");
+    assert.equal(nthCall, 2);
+  });
+
+  it("honors result.terminate=true to end the loop on a non-listed tool", async () => {
+    const { handle } = scriptedModel([
+      { stopReason: "tool_use", content: [toolUse("noop", {}, "1")] },
+    ]);
+
+    const r = await runAgentLoop({
+      model: handle,
+      initialMessages: [{ role: "user", content: "x" }],
+      tools: [NOOP_TOOL],
+      executeTool: async (call) => ({
+        tool_use_id: call.id,
+        content: "stop",
+        terminate: true,
+      }),
+      maxTurns: 5,
+      maxTokensPerTurn: 100,
+    });
+
+    assert.equal(r.stopReason, "terminal_tool");
+    assert.equal(r.turns, 1);
+  });
+
   it("passes system + temperature + tools through to the model", async () => {
     const { handle, calls } = scriptedModel([
       { stopReason: "end_turn", content: textOnly("ok") },

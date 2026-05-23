@@ -26,10 +26,10 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# git: clone the target repo into /tmp/<run> for the agent to read + (B.3)
-#      branch/commit/push from.
+# git: clone + branch + commit + push the target repo to/from /tmp/<run>.
+# bash: the agent's bash tool dispatches through /bin/bash (B.3).
 # ca-certificates: TLS to api.github.com and github.com.
-RUN apk add --no-cache git ca-certificates
+RUN apk add --no-cache git bash ca-certificates
 
 COPY --from=builder /build/dist/index.js /app/index.js
 
