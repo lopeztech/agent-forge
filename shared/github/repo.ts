@@ -96,6 +96,35 @@ export async function addLabels(
   );
 }
 
+// Creates a label on the repo if it doesn't exist. Returns true if created.
+// Idempotent: a 422 "already_exists" response is treated as a successful no-op.
+// Used by BA to materialize per-product `area:<name>` labels on demand —
+// these aren't seeded centrally because their names come from each target
+// repo's .agent-forge/areas.yml.
+export async function ensureLabel(
+  opts: RequestOptions,
+  repo: string,
+  name: string,
+  color: string,
+  description: string,
+): Promise<boolean> {
+  const r = await gh(opts, "POST", `/repos/${repo}/labels`, {
+    name,
+    color,
+    description,
+  });
+  if (r.ok) return true;
+  if (r.status === 422) {
+    // 422 = label already exists. The GitHub error body has a non-stable
+    // shape; we don't bother re-parsing, just treat as a no-op.
+    return false;
+  }
+  const text = await r.text();
+  throw new Error(
+    `Creating label "${name}" failed: ${r.status} ${r.statusText}\n${text}`,
+  );
+}
+
 // Removing a label that's not present returns 404. Treated as a no-op so
 // callers don't have to pre-check.
 export async function removeLabel(

@@ -38,6 +38,11 @@ export type BAExpansionState = {
     detected: boolean;
     reason: string;
   };
+  // Areas BA decided this issue touches. Either a subset of areas.yml's
+  // area names, ["*"] for wildcard, or [] when BA couldn't categorize (in
+  // which case BA parks the issue at human-needed + gap:areas-incomplete
+  // before downstream roles see it).
+  areas?: string[];
   spec_path?: string;
   spec_files?: string[];
   spec_missing?: boolean;
