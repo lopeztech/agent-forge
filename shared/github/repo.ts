@@ -10,6 +10,14 @@ export type RequestOptions = {
   userAgent: string;
 };
 
+export type GitHubIssue = {
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  labels?: Array<{ name: string }>;
+};
+
 async function gh(
   opts: RequestOptions,
   method: string,
@@ -59,6 +67,19 @@ export async function postComment(
     { body },
   );
   return (await r.json()) as { id: number; html_url: string };
+}
+
+export async function getIssue(
+  opts: RequestOptions,
+  repo: string,
+  issueNumber: number | string,
+): Promise<GitHubIssue> {
+  const r = await ghOrThrow(
+    opts,
+    "GET",
+    `/repos/${repo}/issues/${issueNumber}`,
+  );
+  return (await r.json()) as GitHubIssue;
 }
 
 export async function addLabels(
