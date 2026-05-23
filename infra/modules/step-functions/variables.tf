@@ -18,6 +18,21 @@ variable "ba_execution_role_arn" {
   description = "BA execution role ARN. Step Function execution role needs iam:PassRole for it."
 }
 
+variable "dev_task_definition_arn" {
+  type        = string
+  description = "Dev task definition ARN (versioned). Step Function calls ecs:RunTask with this."
+}
+
+variable "dev_task_role_arn" {
+  type        = string
+  description = "Dev task role ARN. Step Function execution role needs iam:PassRole for it."
+}
+
+variable "dev_execution_role_arn" {
+  type        = string
+  description = "Dev execution role ARN. Step Function execution role needs iam:PassRole for it."
+}
+
 variable "cluster_arn" {
   type        = string
   description = "ECS cluster ARN where tasks are launched."

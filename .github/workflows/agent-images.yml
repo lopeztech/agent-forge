@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "agents/ba/**"
+      - "agents/dev/**"
       - "shared/**"
       - "package.json"
       - "package-lock.json"
@@ -13,11 +14,11 @@ on:
   workflow_dispatch:
     inputs:
       role:
-        description: "agent role to (re)build (currently only `ba` exists)"
+        description: "agent role to (re)build"
         required: true
         default: ba
         type: choice
-        options: [ba]
+        options: [ba, dev]
 
 permissions:
   id-token: write
@@ -34,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        role: [ba]
+        role: [ba, dev]
 
     steps:
       - uses: actions/checkout@v4
