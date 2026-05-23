@@ -8,6 +8,7 @@
     "node": ">=22.6.0"
   },
   "scripts": {
+    "test": "node --experimental-strip-types --test tests/**/*.test.ts",
     "typecheck": "tsc --noEmit",
     "onboard:github-apps": "node --experimental-strip-types scripts/onboard-github-apps.ts",
     "seed:labels": "node --experimental-strip-types scripts/seed-labels.ts",
