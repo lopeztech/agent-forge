@@ -18,6 +18,13 @@ export type GitHubIssue = {
   labels?: Array<{ name: string }>;
 };
 
+// A freshly-minted GitHub installation token can briefly return 401 "Bad
+// credentials" from a stale edge cache before propagating — observed in
+// production on the Cost Estimator Lambda where postComment(...) succeeded
+// and addLabels(...) failed 600ms later on the same token. One short retry
+// resolves this. If it's still 401 after that, the token really is bad.
+const TRANSIENT_AUTH_RETRY_DELAY_MS = 500;
+
 async function gh(
   opts: RequestOptions,
   method: string,
@@ -35,7 +42,23 @@ async function gh(
     },
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   };
-  return fetch(`${API}${path}`, init);
+  const url = `${API}${path}`;
+  let r = await fetch(url, init);
+  if (r.status === 401) {
+    console.log(
+      JSON.stringify({
+        msg: "github-api-401-retry",
+        method,
+        path,
+        delay_ms: TRANSIENT_AUTH_RETRY_DELAY_MS,
+      }),
+    );
+    await new Promise((resolve) =>
+      setTimeout(resolve, TRANSIENT_AUTH_RETRY_DELAY_MS),
+    );
+    r = await fetch(url, init);
+  }
+  return r;
 }
 
 async function ghOrThrow(
