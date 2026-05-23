@@ -20,6 +20,7 @@ import {
   PutEventsCommand,
 } from "@aws-sdk/client-eventbridge";
 
+import { envOrDefault, requiredEnv } from "../../../../shared/env.ts";
 import { resolveProductByRepo } from "../../../../shared/state/products.ts";
 
 type APIGatewayProxyEventV2 = {
@@ -34,18 +35,12 @@ type APIGatewayProxyResultV2 = {
   body?: string;
 };
 
-const REGION = process.env.AWS_REGION ?? "eu-west-1";
-const WEBHOOK_SECRET_NAME = required("WEBHOOK_SECRET_NAME");
-const PRODUCTS_TABLE = required("PRODUCTS_TABLE");
-const REPO_INDEX_NAME = required("REPO_INDEX_NAME");
-const EVENT_BUS_NAME = required("EVENT_BUS_NAME");
-const EVENT_SOURCE = process.env.EVENT_SOURCE ?? "agent-forge.webhook";
-
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
-}
+const REGION = envOrDefault("AWS_REGION", "eu-west-1");
+const WEBHOOK_SECRET_NAME = requiredEnv("WEBHOOK_SECRET_NAME");
+const PRODUCTS_TABLE = requiredEnv("PRODUCTS_TABLE");
+const REPO_INDEX_NAME = requiredEnv("REPO_INDEX_NAME");
+const EVENT_BUS_NAME = requiredEnv("EVENT_BUS_NAME");
+const EVENT_SOURCE = envOrDefault("EVENT_SOURCE", "agent-forge.webhook");
 
 const sm = new SecretsManagerClient({ region: REGION });
 const eb = new EventBridgeClient({ region: REGION });

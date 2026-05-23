@@ -44,15 +44,16 @@ import {
   requireWriterInstallId,
   type ProductConfig,
 } from "../../../../shared/state/products.ts";
+import { requiredEnv } from "../../../../shared/env.ts";
 
 // ---------------------------------------------------------------------------
 // Env + clients
 // ---------------------------------------------------------------------------
 
-const PRODUCTS_TABLE = required("PRODUCTS_TABLE");
-const ISSUE_STATE_TABLE = required("ISSUE_STATE_TABLE");
-const BUDGET_LEDGER_TABLE = required("BUDGET_LEDGER_TABLE");
-const APP_SECRET_NAME = required("APP_SECRET_NAME");
+const PRODUCTS_TABLE = requiredEnv("PRODUCTS_TABLE");
+const ISSUE_STATE_TABLE = requiredEnv("ISSUE_STATE_TABLE");
+const BUDGET_LEDGER_TABLE = requiredEnv("BUDGET_LEDGER_TABLE");
+const APP_SECRET_NAME = requiredEnv("APP_SECRET_NAME");
 const HARD_PER_ISSUE_CAP_USD = Number(
   process.env.HARD_PER_ISSUE_CAP_USD ?? "12",
 );
@@ -60,12 +61,6 @@ const DEFAULT_THRESHOLD_USD = Number(
   process.env.DEFAULT_COST_APPROVAL_THRESHOLD_USD ?? "1",
 );
 const USER_AGENT = "agent-forge-cost-estimator";
-
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
-}
 
 // ---------------------------------------------------------------------------
 // EventBridge event shape
