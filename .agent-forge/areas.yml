@@ -1,0 +1,46 @@
+# Top-level areas for agent-forge (the platform repo). Dev locks at this
+# granularity so two Devs can work non-overlapping areas in parallel.
+#
+# BA matches issue scope → `area:<name>` labels using the `paths:` globs.
+# Add a new area when a new top-level subsystem is introduced; never split
+# an existing area without thinking about lock-contention impact.
+
+areas:
+  agents:
+    paths:
+      - agents/**
+
+  glue:
+    paths:
+      - infra/glue/**
+
+  infra:
+    paths:
+      - infra/bootstrap/**
+      - infra/envs/**
+      - infra/modules/**
+
+  shared:
+    paths:
+      - shared/**
+
+  scripts:
+    paths:
+      - scripts/**
+
+  docs:
+    paths:
+      - spec/**
+      - docs/**
+      - README.md
+      - CLAUDE.md
+      - AGENTS.md
+      - CONTRIBUTING.md
+
+  ci:
+    paths:
+      - .github/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .terraform-version
