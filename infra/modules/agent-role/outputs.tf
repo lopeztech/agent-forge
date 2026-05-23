@@ -13,6 +13,11 @@ output "task_role_arn" {
   description = "Task role ARN (the role the agent code runs as)."
 }
 
+output "task_role_name" {
+  value       = aws_iam_role.task.name
+  description = "Task role name. Useful when attaching additional inline policies from the caller."
+}
+
 output "execution_role_arn" {
   value       = aws_iam_role.execution.arn
   description = "Execution role ARN (Fargate uses this to pull the image + write logs)."

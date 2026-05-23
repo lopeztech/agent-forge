@@ -37,6 +37,7 @@ export function iterLabel(attempt: 1 | 2 | 3): `iter:${1 | 2 | 3}` {
   return `iter:${attempt}`;
 }
 
+export const AREA_LABEL_PREFIX = "area:";
 export const AREA_ALL_LABEL = "area:*";
 
 export const TERMINAL_STATE_LABELS = new Set<StateLabel>([
@@ -46,6 +47,35 @@ export const TERMINAL_STATE_LABELS = new Set<StateLabel>([
 
 export function isStateLabel(label: string): label is StateLabel {
   return (Object.values(STATE_LABELS) as string[]).includes(label);
+}
+
+export type ParsedAreaLabels = {
+  hasAll: boolean;
+  areaIds: string[];
+};
+
+// Extracts `area:<name>` labels from an issue. `area:*` is split out into
+// `hasAll` because callers need to expand it against the product's full area
+// set (read from `.agent-forge/areas.yml`). Non-area labels are ignored.
+export function parseAreaLabels(
+  labels: ReadonlyArray<{ name: string }>,
+): ParsedAreaLabels {
+  let hasAll = false;
+  const areaIds = new Set<string>();
+  for (const { name } of labels) {
+    if (!name.startsWith(AREA_LABEL_PREFIX)) continue;
+    const suffix = name.slice(AREA_LABEL_PREFIX.length);
+    if (suffix === "") continue;
+    if (suffix === "*") {
+      hasAll = true;
+      continue;
+    }
+    areaIds.add(suffix);
+  }
+  return {
+    hasAll,
+    areaIds: [...areaIds].sort((a, b) => a.localeCompare(b)),
+  };
 }
 
 export type LabelDefinition = {

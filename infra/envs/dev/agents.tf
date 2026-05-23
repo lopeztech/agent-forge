@@ -44,6 +44,12 @@ module "ecr_ba" {
   repository_name = "${var.name_prefix}/ba"
 }
 
+module "ecr_dev" {
+  source = "../../modules/ecr"
+
+  repository_name = "${var.name_prefix}/dev"
+}
+
 # ------------------------------------------------------------------------------
 # BA agent role (Slice A stub — no Bedrock yet)
 # ------------------------------------------------------------------------------
@@ -85,19 +91,82 @@ module "agent_ba" {
 }
 
 # ------------------------------------------------------------------------------
-# Step Functions: BA issue-lifecycle state machine
+# Dev agent role (Slice A — orchestration + area-lock proof, no Bedrock yet)
+# ------------------------------------------------------------------------------
+
+module "agent_dev" {
+  source = "../../modules/agent-role"
+
+  name_prefix     = var.name_prefix
+  role            = "dev"
+  env             = "dev"
+  image_uri       = "${module.ecr_dev.repository_url}:latest"
+  app_secret_arn  = module.secrets.writer_secret_arn
+  app_secret_name = module.secrets.writer_secret_name
+  cluster_arn     = module.ecs_cluster.cluster_arn
+
+  subnets           = data.aws_subnets.default_public.ids
+  security_group_id = aws_security_group.agent_tasks.id
+
+  products_table_name = module.dynamodb.table_names["products"]
+
+  extra_environment = {
+    AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
+    AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_AREA_LOCKS_TABLE    = module.dynamodb.table_names["area_locks"]
+  }
+
+  # Dev needs read on products + the same write surface as BA, plus area_locks
+  # (Get/Put/Update for the conditional-write acquire path, Delete via the
+  # broader policy below).
+  dynamodb_table_arns = {
+    products      = module.dynamodb.table_arns["products"]
+    issue_state   = module.dynamodb.table_arns["issue_state"]
+    team_memory   = module.dynamodb.table_arns["team_memory"]
+    budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+    area_locks    = module.dynamodb.table_arns["area_locks"]
+  }
+
+  # Slice A holds no Bedrock perms — the agent does no model call yet.
+  # Slice B (code generation) will add sonnet-4-6 and, on the final attempt,
+  # opus-4-7.
+}
+
+# Dev releases its own locks via DeleteItem; the agent-role module's base task
+# policy only grants Get/Put/Update/Query. Attach a focused inline policy for
+# DeleteItem on area_locks so the lock-release path works without widening the
+# shared module.
+data "aws_iam_policy_document" "agent_dev_area_lock_release" {
+  statement {
+    sid       = "DeleteOwnAreaLocks"
+    actions   = ["dynamodb:DeleteItem"]
+    resources = [module.dynamodb.table_arns["area_locks"]]
+  }
+}
+
+resource "aws_iam_role_policy" "agent_dev_area_lock_release" {
+  name   = "${var.name_prefix}-dev-area-lock-release"
+  role   = module.agent_dev.task_role_name
+  policy = data.aws_iam_policy_document.agent_dev_area_lock_release.json
+}
+
+# ------------------------------------------------------------------------------
+# Step Functions: BA + Dev issue-lifecycle state machines
 # ------------------------------------------------------------------------------
 
 module "step_functions" {
   source = "../../modules/step-functions"
 
-  name_prefix            = var.name_prefix
-  ba_task_definition_arn = module.agent_ba.task_definition_arn
-  ba_task_role_arn       = module.agent_ba.task_role_arn
-  ba_execution_role_arn  = module.agent_ba.execution_role_arn
-  cluster_arn            = module.ecs_cluster.cluster_arn
-  subnets                = data.aws_subnets.default_public.ids
-  security_group_id      = aws_security_group.agent_tasks.id
+  name_prefix             = var.name_prefix
+  ba_task_definition_arn  = module.agent_ba.task_definition_arn
+  ba_task_role_arn        = module.agent_ba.task_role_arn
+  ba_execution_role_arn   = module.agent_ba.execution_role_arn
+  dev_task_definition_arn = module.agent_dev.task_definition_arn
+  dev_task_role_arn       = module.agent_dev.task_role_arn
+  dev_execution_role_arn  = module.agent_dev.execution_role_arn
+  cluster_arn             = module.ecs_cluster.cluster_arn
+  subnets                 = data.aws_subnets.default_public.ids
+  security_group_id       = aws_security_group.agent_tasks.id
 }
 
 # ------------------------------------------------------------------------------
@@ -145,6 +214,12 @@ data "aws_iam_policy_document" "eb_to_sfn" {
     actions   = ["states:StartExecution"]
     resources = [module.step_functions.ba_state_machine_arn]
   }
+
+  statement {
+    sid       = "StartDevExecutions"
+    actions   = ["states:StartExecution"]
+    resources = [module.step_functions.dev_state_machine_arn]
+  }
 }
 
 resource "aws_iam_role_policy" "eb_to_sfn" {
@@ -158,5 +233,37 @@ resource "aws_cloudwatch_event_target" "state_idea_to_ba" {
   event_bus_name = module.eventbridge.bus_name
   target_id      = "ba-state-machine"
   arn            = module.step_functions.ba_state_machine_arn
+  role_arn       = aws_iam_role.eb_to_sfn.arn
+}
+
+# ------------------------------------------------------------------------------
+# EventBridge rule: webhook event "issues.labeled" + label.name = "state:ready"
+# → Dev state machine.
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_event_rule" "state_ready_to_dev" {
+  name           = "${var.name_prefix}-state-ready-to-dev"
+  description    = "Issues labeled state:ready → Dev state machine."
+  event_bus_name = module.eventbridge.bus_name
+
+  event_pattern = jsonencode({
+    source      = ["agent-forge.webhook"]
+    detail-type = ["issues"]
+    detail = {
+      action = ["labeled"]
+      payload = {
+        label = {
+          name = ["state:ready"]
+        }
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "state_ready_to_dev" {
+  rule           = aws_cloudwatch_event_rule.state_ready_to_dev.name
+  event_bus_name = module.eventbridge.bus_name
+  target_id      = "dev-state-machine"
+  arn            = module.step_functions.dev_state_machine_arn
   role_arn       = aws_iam_role.eb_to_sfn.arn
 }
