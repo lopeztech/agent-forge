@@ -11,11 +11,13 @@
 //
 // Branch behaviours:
 //   1. Issue has no `area:*` labels at all          → park with gap:areas-incomplete.
-//   2. Issue has `area:*` (the wildcard)            → park; full-area lock needs areas.yml (next slice).
+//   2. Issue has `area:*` (the wildcard)            → fetch areas.yml; lock the
+//                                                     full area set alphabetically.
+//                                                     Missing areas.yml → park
+//                                                     with gap:areas-incomplete.
 //   3. Issue has concrete `area:<name>` labels      → acquire all alphabetically, release, park.
 //
 // Out of scope this slice (deliberate):
-//   - Reading `.agent-forge/areas.yml` from the target repo
 //   - Bedrock model invocation (no code generation yet)
 //   - Branching from main, opening a PR
 //   - Iteration counter / kickback flow
@@ -38,6 +40,7 @@ import {
   STATE_LABELS,
   parseAreaLabels,
 } from "../../../shared/labels.ts";
+import { readAreasFile } from "../../../shared/github/areas.ts";
 import {
   requireProduct,
   requireWriterInstallId,
@@ -131,25 +134,37 @@ function commentMissingAreas(runId: string): string {
   ].join("\n");
 }
 
-function commentWildcardDeferred(runId: string): string {
+function commentMissingAreasYaml(runId: string, areasPath: string): string {
   return [
     HEADER(runId),
     "",
-    `Issue carries \`${AREA_ALL_LABEL}\`. Resolving the full area set requires reading ` +
-      "`.agent-forge/areas.yml` from the target repo, which lands in the next slice.",
+    `Issue carries \`${AREA_ALL_LABEL}\`, but the target repo has no \`${areasPath}\` ` +
+      "to expand it against.",
     "",
-    `Parking at \`${HUMAN_NEEDED_LABEL}\` for now.`,
+    `Adding \`${GAP_LABELS.areasIncomplete}\` and parking at \`${HUMAN_NEEDED_LABEL}\`. ` +
+      `A human should commit \`${areasPath}\` (see CLAUDE.md → Concurrency model) ` +
+      "and clear the label.",
     "",
     "<sub>Slice A does not implement code; it only verifies orchestration + area-lock plumbing.</sub>",
   ].join("\n");
 }
 
-function commentLockProofOk(runId: string, areaIds: string[]): string {
+function commentLockProofOk(
+  runId: string,
+  areaIds: string[],
+  source: "concrete" | "wildcard",
+  areasPath?: string,
+): string {
   const list = areaIds.map((a) => `\`${a}\``).join(", ");
+  const sourceLine =
+    source === "wildcard"
+      ? `Expanded \`${AREA_ALL_LABEL}\` against \`${areasPath}\` → locked every declared area.`
+      : "Locked from concrete `area:<name>` labels on the issue.";
   return [
     HEADER(runId),
     "",
     `Acquired area locks (alphabetical): ${list}.`,
+    sourceLine,
     "Lock plumbing verified end-to-end; releasing locks now.",
     "",
     `Parking at \`${HUMAN_NEEDED_LABEL}\` — the slice that actually writes code lands next.`,
@@ -226,41 +241,80 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Branch 2: area:* wildcard — needs areas.yml, which lands in the next slice.
-  if (areas.hasAll && areas.areaIds.length === 0) {
-    await postComment(ghOpts, REPO, ISSUE_NUMBER, commentWildcardDeferred(runId));
-    await transitionLabel(
-      ghOpts,
-      REPO,
-      ISSUE_NUMBER,
-      STATE_LABELS.ready,
-      HUMAN_NEEDED_LABEL,
-    );
-    log({ msg: "area:* present but areas.yml resolution deferred; parked" });
-    return;
+  // Branch 2: area:* wildcard — read areas.yml from the target repo, then
+  // either acquire the full area set or park (if the file is missing).
+  // (If both `area:*` and concrete `area:<foo>` are present, the wildcard
+  // wins by design — locks span every declared area.)
+  let lockAreaIds: string[] | null = null;
+  let allAreaIds: string[] | undefined;
+  let lockSource: "concrete" | "wildcard" = "concrete";
+  let areasPath = product.areas_path ?? ".agent-forge/areas.yml";
+
+  if (areas.hasAll) {
+    const areasFile = await readAreasFile({
+      token,
+      userAgent: USER_AGENT,
+      repo: REPO,
+      ...(product.areas_path ? { path: product.areas_path } : {}),
+    });
+    areasPath = areasFile.path;
+
+    if (areasFile.missing) {
+      log({ msg: "area:* requested but areas.yml missing", path: areasPath });
+      await postComment(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        commentMissingAreasYaml(runId, areasPath),
+      );
+      await addLabels(ghOpts, REPO, ISSUE_NUMBER, [GAP_LABELS.areasIncomplete]);
+      await transitionLabel(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        STATE_LABELS.ready,
+        HUMAN_NEEDED_LABEL,
+      );
+      return;
+    }
+
+    log({
+      msg: "loaded areas.yml",
+      path: areasPath,
+      area_names: areasFile.areas.areaNames,
+    });
+    allAreaIds = areasFile.areas.areaNames;
+    lockAreaIds = ["*"];
+    lockSource = "wildcard";
+  } else {
+    // Branch 3: concrete area:<name> labels — acquire just those.
+    lockAreaIds = areas.areaIds;
+    lockSource = "concrete";
   }
 
-  // Branch 3: concrete area:<name> labels — acquire + release + park.
-  // (If `area:*` is also present we ignore the wildcard for now and lock the
-  // concrete subset; full-area resolution lands with areas.yml.)
   const result = await acquireAreaLocks({
     tableName: AREA_LOCKS_TABLE,
     productId: PRODUCT_ID,
-    areaIds: areas.areaIds,
+    areaIds: lockAreaIds,
+    ...(allAreaIds ? { allAreaIds } : {}),
     ownerId: runId,
     ttlSeconds: LOCK_TTL_SECONDS,
   });
+
+  const attemptedAreaIds =
+    lockSource === "wildcard" ? (allAreaIds ?? []) : areas.areaIds;
 
   if (!result.acquired) {
     log({
       msg: "lock contention",
       blocked_area_id: result.blockedAreaId,
+      lock_source: lockSource,
     });
     await postComment(
       ghOpts,
       REPO,
       ISSUE_NUMBER,
-      commentLockContended(runId, areas.areaIds, result.blockedAreaId),
+      commentLockContended(runId, attemptedAreaIds, result.blockedAreaId),
     );
     await transitionLabel(
       ghOpts,
@@ -276,6 +330,7 @@ async function main(): Promise<void> {
     msg: "acquired area locks",
     area_ids: result.lease.areaIds,
     expires_at: result.lease.expiresAt,
+    lock_source: lockSource,
   });
 
   try {
@@ -283,7 +338,7 @@ async function main(): Promise<void> {
       ghOpts,
       REPO,
       ISSUE_NUMBER,
-      commentLockProofOk(runId, result.lease.areaIds),
+      commentLockProofOk(runId, result.lease.areaIds, lockSource, areasPath),
     );
     await transitionLabel(
       ghOpts,
