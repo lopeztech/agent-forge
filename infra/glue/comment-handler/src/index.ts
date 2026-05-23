@@ -26,16 +26,11 @@ import {
   requireWriterInstallId,
   type ProductConfig,
 } from "../../../../shared/state/products.ts";
+import { requiredEnv } from "../../../../shared/env.ts";
 
-const PRODUCTS_TABLE = required("PRODUCTS_TABLE");
-const APP_SECRET_NAME = required("APP_SECRET_NAME");
+const PRODUCTS_TABLE = requiredEnv("PRODUCTS_TABLE");
+const APP_SECRET_NAME = requiredEnv("APP_SECRET_NAME");
 const USER_AGENT = "agent-forge-comment-handler";
-
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
-}
 
 // ---------------------------------------------------------------------------
 // EventBridge event shape

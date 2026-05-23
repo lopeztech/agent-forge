@@ -53,26 +53,21 @@ import {
   requireWriterInstallId,
   type ProductConfig,
 } from "../../../shared/state/products.ts";
+import { requiredEnv } from "../../../shared/env.ts";
 
 // ---------------------------------------------------------------------------
 // Env
 // ---------------------------------------------------------------------------
 
-function required(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
-}
-
-const PRODUCT_ID = required("AGENT_FORGE_PRODUCT_ID");
-const ISSUE_NUMBER = Number(required("AGENT_FORGE_ISSUE_NUMBER"));
-const REPO = required("AGENT_FORGE_REPO");
-const APP_SECRET_NAME = required("AGENT_FORGE_APP_SECRET_NAME");
-const PRODUCTS_TABLE = required("AGENT_FORGE_PRODUCTS_TABLE");
-const ISSUE_STATE_TABLE = required("AGENT_FORGE_ISSUE_STATE_TABLE");
-const BUDGET_LEDGER_TABLE = required("AGENT_FORGE_BUDGET_LEDGER_TABLE");
-const ROLE = required("AGENT_FORGE_ROLE");
-const ENV = required("AGENT_FORGE_ENV");
+const PRODUCT_ID = requiredEnv("AGENT_FORGE_PRODUCT_ID");
+const ISSUE_NUMBER = Number(requiredEnv("AGENT_FORGE_ISSUE_NUMBER"));
+const REPO = requiredEnv("AGENT_FORGE_REPO");
+const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
+const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
+const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
+const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const ROLE = requiredEnv("AGENT_FORGE_ROLE");
+const ENV = requiredEnv("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
 const LABEL = process.env.AGENT_FORGE_LABEL ?? "unknown";
 
