@@ -28,3 +28,9 @@ terraform.rc
 node_modules/
 dist/
 *.tsbuildinfo
+
+# Lambda build artifacts produced by `terraform plan/apply` (archive_file
+# data sources unzip into infra/modules/<lambda>/.build/ on the host
+# running terraform). The real artifacts are built fresh in CI; the local
+# ones are noise.
+infra/modules/*/.build/

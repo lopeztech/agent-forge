@@ -1,28 +1,27 @@
-// Dev (Developer) — Slice B.1: thin Sonnet 4.6 loop, parks after proposing.
+// Dev (Developer) — Slice B.2: clone target repo + read tools.
 //
 // Trigger: issue gets label `state:ready`. EventBridge → Step Function → this
 // Fargate task. Env vars come from RunTask container overrides
 // (see infra/modules/step-functions/asl/dev-issue-lifecycle.asl.json).
 //
-// This slice proves the multi-turn tool-use loop end-to-end (via
-// `shared/agent-loop.ts`) and the BA→Dev state handoff (issue_state read),
-// but does NOT yet edit code. The agent reads the BA expansion, reads the
-// target repo's spec, and calls a single `propose_plan` tool. The wrapper
-// posts the plan as a PR-ready outline, releases area locks, and parks the
-// issue at `human-needed`. Branches that fail earlier (no areas, missing
-// areas.yml, lock contention) skip the model call entirely.
+// B.2 extends B.1 by giving the agent a real view of the target repo. After
+// area-lock acquisition the wrapper shallow-clones the default branch into
+// /tmp/<runId> and exposes `read_file`, `list_directory`, and `grep` tools
+// alongside `propose_plan`. The plan now cites concrete files and reflects
+// what the agent actually saw, not just inference from issue body + spec.
 //
-// Branch behaviours (B.1):
+// Branch behaviours (unchanged from B.1 except for the clone step):
 //   1. No `area:*` labels at all              → park with gap:areas-incomplete.
 //   2. `area:*` and areas.yml missing         → park with gap:areas-incomplete.
-//   3. Concrete or area:* (expanded) areas    → acquire locks → Sonnet 4.6
-//      loop with `propose_plan` tool → post plan comment → park at
-//      `human-needed` → release locks → record spend.
+//   3. Concrete or area:* (expanded) areas    → acquire locks → clone repo →
+//      Sonnet 4.6 loop with read tools + `propose_plan` (terminal) → post
+//      plan comment → park at `human-needed` → release locks + cleanup
+//      workdir → record spend.
 //   4. Lock contention                        → park at `human-needed`.
 //
 // Out of scope this slice (deliberate):
-//   - File reads/writes from the target repo (lands in B.2)
-//   - Git operations + PR creation (B.3)
+//   - File writes / branch / commit / push / PR open (B.3)
+//   - bash tool (B.3)
 //   - Sonnet → Opus escalation on attempt N (B.4)
 //   - Per-issue budget cap check before model call (B.4)
 
@@ -59,6 +58,8 @@ import {
   requireWriterInstallId,
   type ProductConfig,
 } from "../../../shared/state/products.ts";
+import { buildReadToolDefinitions, dispatchReadTool } from "./tools.ts";
+import { cloneTargetRepo, type ClonedWorkdir } from "./workdir.ts";
 
 // ---------------------------------------------------------------------------
 // Env
@@ -84,10 +85,10 @@ const USER_AGENT = `agent-forge-${ROLE}`;
 // runs tests, this ceiling becomes the wall-clock cap for the whole attempt.
 const LOCK_TTL_SECONDS = 2 * 60 * 60;
 
-// Agent loop bounds. The propose_plan tool is terminal, so a healthy run
-// returns after 1 turn. A few extra turns absorb the case where the model
-// hedges with text before the tool call.
-const AGENT_MAX_TURNS = 5;
+// Agent loop bounds. B.2 added read tools, so the agent typically spends 5-15
+// turns investigating before calling propose_plan. 30 turns is the hard cap
+// before we declare the agent stuck and park the issue.
+const AGENT_MAX_TURNS = 30;
 const AGENT_MAX_TOKENS_PER_TURN = 4096;
 
 // ---------------------------------------------------------------------------
@@ -230,22 +231,40 @@ You are agent-forge's Developer (Dev) role. Your job is to take a structured
 issue (already expanded by BA, already cost-approved) and turn it into a code
 change against the target product repository.
 
-This run is a "planning slice". The tools you'd normally use to read or write
-files do not exist in this slice — they land in a follow-up. Read the issue +
-BA expansion, read the product spec for context, and submit a concrete
-implementation plan via the propose_plan tool. Do NOT speculate about file
-contents you cannot see; if a step depends on understanding code you can't
-read yet, surface that as an open question instead of guessing.
+This run is the "planning slice". A shallow clone of the target repo is
+available; you have three read tools:
+
+- list_directory(path)   — enumerate immediate children. Heavy build/cache
+                           directories (node_modules, .git, dist, .terraform,
+                           etc.) are skipped automatically.
+- grep(pattern, path)    — recursive regex search for symbols / strings.
+                           Returns "path:lineno: content" lines.
+- read_file(path)        — fetch one file's contents (capped at 100 KB;
+                           binary files refused).
+
+Investigate before planning. Don't speculate about file contents you haven't
+read. A useful loop:
+
+  1. list_directory(".") to see the repo layout.
+  2. grep / list_directory under the area(s) you hold locks on.
+  3. read_file the specific files your plan will touch.
+  4. Call propose_plan with concrete file paths in files_to_touch.
+
+When you're satisfied, call propose_plan exactly once. propose_plan is
+TERMINAL — the loop exits after it. Do not call it speculatively; once you
+call it, you're done.
 
 Style:
-- Be concrete. "Add foo() to src/x.ts and call it from src/y.ts" beats
+- Be concrete. "Add foo() in src/x.ts:42 and call it from src/y.ts:113" beats
   "implement the feature".
 - Cite spec sections or BA acceptance criteria when they constrain a choice.
 - If two approaches are reasonable, pick the one most consistent with what's
   already in the spec and mention the alternative as an open question.
+- Stay within your locked areas. If your plan needs to touch outside them,
+  surface that as an open question, not a step.
 
 You MUST call propose_plan exactly once. Do not produce any free-form text
-response.
+response outside of the tool-call exchange.
 `.trim();
 
 function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
@@ -328,6 +347,7 @@ function commentPlanPosted(
   modelId: string,
   plan: ProposedPlan,
   lockedAreaIds: string[],
+  turns: number,
 ): string {
   const bullets = (xs: string[], fallback = "_(none)_") =>
     xs.length === 0 ? fallback : xs.map((s) => `- ${s}`).join("\n");
@@ -335,7 +355,7 @@ function commentPlanPosted(
     xs.length === 0 ? fallback : xs.map((s, i) => `${i + 1}. ${s}`).join("\n");
 
   return [
-    `## Dev plan (Slice B.1, run \`${runId}\`, ${modelId})`,
+    `## Dev plan (Slice B.2, run \`${runId}\`, ${modelId}, ${turns} turn${turns === 1 ? "" : "s"})`,
     "",
     `Locked areas: ${lockedAreaIds.map((a) => `\`${a}\``).join(", ")}`,
     "",
@@ -346,7 +366,7 @@ function commentPlanPosted(
     "",
     "### Files this is expected to touch",
     plan.files_to_touch.length === 0
-      ? "_(unknown until B.2 lands file-reading tools)_"
+      ? "_(none cited)_"
       : plan.files_to_touch.map((f) => `- \`${f}\``).join("\n"),
     "",
     "### Open questions",
@@ -354,7 +374,7 @@ function commentPlanPosted(
     "",
     `Parking at \`${HUMAN_NEEDED_LABEL}\` — actual code generation lands in Slice B.3.`,
     "",
-    `<sub>Slice B.1 proves the tool-use loop end-to-end; no files were read or modified.</sub>`,
+    "<sub>Slice B.2 reads the target repo via shallow clone + read_file/list_directory/grep tools; no files were modified.</sub>",
   ].join("\n");
 }
 
@@ -365,7 +385,7 @@ function commentAgentDidNotPlan(
   turns: number,
 ): string {
   return [
-    `## Dev plan (Slice B.1, run \`${runId}\`, ${modelId})`,
+    `## Dev plan (Slice B.2, run \`${runId}\`, ${modelId})`,
     "",
     `Agent finished without calling \`propose_plan\` (stop reason: \`${stopReason}\`, ${turns} turn${turns === 1 ? "" : "s"}).`,
     "",
@@ -531,7 +551,14 @@ async function main(): Promise<void> {
     lock_source: lockSource,
   });
 
+  let workdir: ClonedWorkdir | undefined;
   try {
+    // Clone target repo into /tmp/<runId> so the agent's read tools have
+    // something to point at. Shallow + single-branch for speed; we don't
+    // commit or push in B.2.
+    workdir = await cloneTargetRepo({ token, repo: REPO, runId });
+    log({ msg: "cloned target repo", workdir: workdir.path });
+
     // Read BA expansion + spec → run the Sonnet 4.6 planning loop.
     const baExpansion = await requireBAExpansion({
       tableName: ISSUE_STATE_TABLE,
@@ -564,23 +591,40 @@ async function main(): Promise<void> {
     });
 
     let capturedPlan: ProposedPlan | undefined;
+    const toolCallCounts: Record<string, number> = {};
+    const wd = workdir.path;
     const executeTool = async (call: ToolCall) => {
-      if (call.name !== "propose_plan") {
-        return {
-          tool_use_id: call.id,
-          content: `Unknown tool: ${call.name}. Call propose_plan instead.`,
-          is_error: true,
-        };
+      toolCallCounts[call.name] = (toolCallCounts[call.name] ?? 0) + 1;
+      if (call.name === "propose_plan") {
+        capturedPlan = call.input as ProposedPlan;
+        return { tool_use_id: call.id, content: "plan recorded" };
       }
-      capturedPlan = call.input as ProposedPlan;
-      return { tool_use_id: call.id, content: "plan recorded" };
+      const dispatched = await dispatchReadTool(wd, call.name, call.input);
+      if (dispatched) {
+        const out =
+          dispatched.content.length > 16384
+            ? `${dispatched.content.slice(0, 16384)}\n[... tool output truncated at 16 KB ...]`
+            : dispatched.content;
+        const result: { tool_use_id: string; content: string; is_error?: boolean } = {
+          tool_use_id: call.id,
+          content: out,
+        };
+        if (dispatched.is_error) result.is_error = true;
+        return result;
+      }
+      return {
+        tool_use_id: call.id,
+        content: `Unknown tool: ${call.name}. Call one of read_file, list_directory, grep, or propose_plan.`,
+        is_error: true,
+      };
     };
 
+    const tools = [...buildReadToolDefinitions(), PROPOSE_PLAN_TOOL];
     const loop = await runAgentLoop({
       model,
       system: buildSystemBlocks(spec),
       initialMessages: [{ role: "user", content: userMessage }],
-      tools: [PROPOSE_PLAN_TOOL],
+      tools,
       executeTool,
       terminalTools: ["propose_plan"],
       maxTurns: AGENT_MAX_TURNS,
@@ -592,6 +636,7 @@ async function main(): Promise<void> {
       msg: "agent loop done",
       stop_reason: loop.stopReason,
       turns: loop.turns,
+      tool_calls: toolCallCounts,
       usage: loop.usage,
       cost_usd: loop.costUsd,
     });
@@ -606,6 +651,7 @@ async function main(): Promise<void> {
           model.bedrockModelId,
           capturedPlan,
           result.lease.areaIds,
+          loop.turns,
         ),
       );
     } else {
@@ -660,6 +706,19 @@ async function main(): Promise<void> {
   } finally {
     await result.lease.release();
     log({ msg: "released area locks", area_ids: result.lease.areaIds });
+    if (workdir) {
+      try {
+        await workdir.cleanup();
+        log({ msg: "cleaned up workdir", path: workdir.path });
+      } catch (err) {
+        // Fargate disposes /tmp on task exit anyway; this is best-effort.
+        log({
+          msg: "workdir cleanup failed (non-fatal)",
+          path: workdir.path,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   log({ msg: "done" });
