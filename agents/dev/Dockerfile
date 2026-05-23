@@ -26,6 +26,11 @@ FROM node:22-alpine
 
 WORKDIR /app
 
+# git: clone the target repo into /tmp/<run> for the agent to read + (B.3)
+#      branch/commit/push from.
+# ca-certificates: TLS to api.github.com and github.com.
+RUN apk add --no-cache git ca-certificates
+
 COPY --from=builder /build/dist/index.js /app/index.js
 
 RUN addgroup -S agent && adduser -S agent -G agent && chown -R agent:agent /app
