@@ -58,6 +58,7 @@ import {
   requireWriterInstallId,
   type ProductConfig,
 } from "../../../shared/state/products.ts";
+import { normalizePlan, type ProposedPlan } from "./plan.ts";
 import { buildReadToolDefinitions, dispatchReadTool } from "./tools.ts";
 import { cloneTargetRepo, type ClonedWorkdir } from "./workdir.ts";
 
@@ -170,12 +171,6 @@ function commentMissingAreasYaml(runId: string, areasPath: string): string {
 // Sonnet 4.6 tool-use: propose_plan
 // ---------------------------------------------------------------------------
 
-type ProposedPlan = {
-  summary: string;
-  steps: string[];
-  files_to_touch: string[];
-  open_questions: string[];
-};
 
 const PROPOSE_PLAN_TOOL: ToolDefinition = {
   name: "propose_plan",
@@ -596,7 +591,14 @@ async function main(): Promise<void> {
     const executeTool = async (call: ToolCall) => {
       toolCallCounts[call.name] = (toolCallCounts[call.name] ?? 0) + 1;
       if (call.name === "propose_plan") {
-        capturedPlan = call.input as ProposedPlan;
+        capturedPlan = normalizePlan(call.input);
+        // Log the raw input alongside the normalized version so we can spot
+        // schema-bending from the model in CloudWatch.
+        log({
+          msg: "propose_plan received",
+          raw: call.input,
+          normalized: capturedPlan,
+        });
         return { tool_use_id: call.id, content: "plan recorded" };
       }
       const dispatched = await dispatchReadTool(wd, call.name, call.input);
