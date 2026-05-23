@@ -27,14 +27,21 @@
 //   - Opus 4.7 escalation for brand-new spec hydration
 
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
+import { readAreasFile, type AreasFile } from "../../../shared/github/areas.ts";
 import {
   addLabels,
+  ensureLabel,
   getIssue,
   postComment,
   transitionLabel,
   type GitHubIssue,
 } from "../../../shared/github/repo.ts";
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
+import {
+  AREA_LABEL_COLOR,
+  areaLabelDescription,
+  chooseAreaLabels,
+} from "./areas.ts";
 import {
   type ContentBlock,
   type SystemBlock,
@@ -44,6 +51,8 @@ import {
 import { recordSpend } from "../../../shared/budget.ts";
 import { putBAExpansion } from "../../../shared/state/issue-state.ts";
 import {
+  AREA_ALL_LABEL,
+  AREA_LABEL_PREFIX,
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
@@ -108,91 +117,112 @@ type BAExpansion = {
   complexity: Complexity;
   rationale: string;
   spec_conflict: SpecConflict;
+  areas: string[];
 };
 
 // ---------------------------------------------------------------------------
 // Sonnet 4.6 tool-use call
 // ---------------------------------------------------------------------------
 
-const SUBMIT_EXPANSION_TOOL = {
-  name: "submit_expansion",
-  description:
-    "Submit the structured expansion of this issue: acceptance criteria, " +
-    "risks, out-of-scope notes, a complexity tag, and a spec-conflict flag. " +
-    "You MUST call this exactly once. Do not produce any free-form text.",
-  input_schema: {
-    type: "object",
-    additionalProperties: false,
-    required: [
-      "acceptance_criteria",
-      "risks",
-      "out_of_scope",
-      "complexity",
-      "rationale",
-      "spec_conflict",
-    ],
-    properties: {
-      acceptance_criteria: {
-        type: "array",
-        minItems: 1,
-        maxItems: 15,
-        items: { type: "string" },
-        description:
-          "Concrete, testable conditions for this issue to be considered done. " +
-          "Each one should be a single observable behaviour or property.",
-      },
-      risks: {
-        type: "array",
-        maxItems: 8,
-        items: { type: "string" },
-        description:
-          "Technical risks, edge cases, or implementation pitfalls a Dev " +
-          "should be aware of. Empty array if none.",
-      },
-      out_of_scope: {
-        type: "array",
-        maxItems: 8,
-        items: { type: "string" },
-        description:
-          "Adjacent work that might seem in-scope but isn't — to prevent " +
-          "scope creep. Empty array if obvious.",
-      },
-      complexity: {
-        enum: ["trivial", "small", "medium", "large"],
-        description:
-          "Rough size: trivial (<2h), small (<half day), medium (~1 day), " +
-          "large (>1 day, likely needs splitting — a follow-up slice will " +
-          "auto-split these).",
-      },
-      rationale: {
-        type: "string",
-        description:
-          "1-3 sentences explaining the expansion — primary driver of " +
-          "complexity, why these specific risks matter, anything else worth noting.",
-      },
-      spec_conflict: {
-        type: "object",
-        additionalProperties: false,
-        required: ["detected", "reason"],
-        properties: {
-          detected: {
-            type: "boolean",
-            description:
-              "True if the issue directly contradicts the product spec — " +
-              "especially anything explicitly listed in non-goals or " +
-              "ruled out elsewhere in spec/. False otherwise.",
+// Dynamic-schema variant: the `areas` field's `items.enum` is pinned to the
+// declared areas + `*`, so the model literally can't return an unknown area
+// (Bedrock enforces tool input_schema). Empty array is allowed — that means
+// "I can't categorize this issue" and the wrapper parks the issue.
+function buildSubmitExpansionTool(declaredAreaNames: string[]) {
+  return {
+    name: "submit_expansion",
+    description:
+      "Submit the structured expansion of this issue: acceptance criteria, " +
+      "risks, out-of-scope notes, a complexity tag, a spec-conflict flag, " +
+      "and the areas of the codebase this issue touches. You MUST call this " +
+      "exactly once. Do not produce any free-form text.",
+    input_schema: {
+      type: "object",
+      additionalProperties: false,
+      required: [
+        "acceptance_criteria",
+        "risks",
+        "out_of_scope",
+        "complexity",
+        "rationale",
+        "spec_conflict",
+        "areas",
+      ],
+      properties: {
+        acceptance_criteria: {
+          type: "array",
+          minItems: 1,
+          maxItems: 15,
+          items: { type: "string" },
+          description:
+            "Concrete, testable conditions for this issue to be considered done. " +
+            "Each one should be a single observable behaviour or property.",
+        },
+        risks: {
+          type: "array",
+          maxItems: 8,
+          items: { type: "string" },
+          description:
+            "Technical risks, edge cases, or implementation pitfalls a Dev " +
+            "should be aware of. Empty array if none.",
+        },
+        out_of_scope: {
+          type: "array",
+          maxItems: 8,
+          items: { type: "string" },
+          description:
+            "Adjacent work that might seem in-scope but isn't — to prevent " +
+            "scope creep. Empty array if obvious.",
+        },
+        complexity: {
+          enum: ["trivial", "small", "medium", "large"],
+          description:
+            "Rough size: trivial (<2h), small (<half day), medium (~1 day), " +
+            "large (>1 day, likely needs splitting — a follow-up slice will " +
+            "auto-split these).",
+        },
+        rationale: {
+          type: "string",
+          description:
+            "1-3 sentences explaining the expansion — primary driver of " +
+            "complexity, why these specific risks matter, anything else worth noting.",
+        },
+        spec_conflict: {
+          type: "object",
+          additionalProperties: false,
+          required: ["detected", "reason"],
+          properties: {
+            detected: {
+              type: "boolean",
+              description:
+                "True if the issue directly contradicts the product spec — " +
+                "especially anything explicitly listed in non-goals or " +
+                "ruled out elsewhere in spec/. False otherwise.",
+            },
+            reason: {
+              type: "string",
+              description:
+                "When detected=true: the verbatim spec text + a one-sentence " +
+                "statement of the contradiction. Empty string when detected=false.",
+            },
           },
-          reason: {
-            type: "string",
-            description:
-              "When detected=true: the verbatim spec text + a one-sentence " +
-              "statement of the contradiction. Empty string when detected=false.",
-          },
+        },
+        areas: {
+          type: "array",
+          maxItems: Math.max(declaredAreaNames.length + 1, 1),
+          items: { enum: [...declaredAreaNames, "*"] },
+          description:
+            "Top-level areas of the codebase this issue will touch. Match the " +
+            "issue's scope against the area paths listed in the system prompt; " +
+            "pick the minimal set. Use `[\"*\"]` only when the change genuinely " +
+            "spans every declared area. Return an empty array `[]` if you can't " +
+            "map the issue to any declared area (e.g. new top-level subsystem) — " +
+            "a human will triage.",
         },
       },
     },
-  },
-};
+  };
+}
 
 const BASE_SYSTEM_PROMPT = `
 You are agent-forge's Business Analyst (BA). You read an incoming GitHub
@@ -220,23 +250,40 @@ than letting downstream estimate and implement forbidden work. Do not set
 detected=true for soft tensions, nuanced trade-offs, or anything the spec
 merely doesn't address — only for clear, citable contradictions.
 
+**Area matching.** The product declares top-level areas (see the AREAS
+section below). The Developer locks at this granularity so non-overlapping
+issues can run in parallel. In submit_expansion.areas, return the minimal
+subset of declared area names this issue will touch. Match by mapping the
+issue's likely file changes against each area's paths. Prefer naming each
+concrete area over the wildcard. Use ["*"] only when the change genuinely
+spans every declared area. Return [] only when the issue doesn't map to any
+declared area — a human will triage.
+
 You MUST call the submit_expansion tool exactly once. Do not produce any
 free-form text response.
 `.trim();
 
-// System prompt is split into two cache-controlled blocks so Anthropic can
+// System prompt is split into three cache-controlled blocks so Anthropic can
 // reuse the prefix across BA calls within the 5-min ephemeral TTL.
 //
 //   block 1: BASE_SYSTEM_PROMPT — stable across products
 //   block 2: spec/ contents     — stable across issues for one product
+//   block 3: declared areas     — stable across issues for one product
 //
-// Minimum cached prefix is 1024 tokens. The base alone (~700 tokens) is below
-// that threshold, so when spec is missing we drop caching entirely and pass a
-// single uncached block. When spec is present (~5+ KB), the combined prefix
-// easily clears the threshold and gets cached.
-function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
+// Minimum cached prefix is 1024 tokens. The base alone (~750 tokens) is below
+// that threshold, so when spec is missing we drop caching entirely. When spec
+// is present (~5+ KB) the combined prefix clears the threshold and gets cached.
+function buildSystemBlocks(
+  spec: SpecReadResult,
+  areas: AreasFile,
+): SystemBlock[] {
+  const areaBlock = buildAreaBlockText(areas);
+
   if (spec.missing || spec.files.length === 0) {
-    return [{ type: "text", text: BASE_SYSTEM_PROMPT }];
+    return [
+      { type: "text", text: BASE_SYSTEM_PROMPT },
+      { type: "text", text: areaBlock },
+    ];
   }
 
   const specBlocks = spec.files
@@ -274,12 +321,40 @@ function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
       text: specBlockText,
       cache_control: { type: "ephemeral" },
     },
+    {
+      type: "text",
+      text: areaBlock,
+      cache_control: { type: "ephemeral" },
+    },
   ];
+}
+
+function buildAreaBlockText(areas: AreasFile): string {
+  const list = areas.areaNames
+    .map((name) => {
+      const paths = areas.paths[name] ?? [];
+      const pathsLine = paths.length === 0 ? "(no paths declared)" : paths.join(", ");
+      return `- **${name}** — ${pathsLine}`;
+    })
+    .join("\n");
+  return [
+    "=====================",
+    "DECLARED AREAS",
+    "=====================",
+    "This product publishes the following top-level areas at",
+    "`.agent-forge/areas.yml`. Dev locks at this granularity. Match the issue's",
+    "scope against these paths and return the minimal subset in",
+    "submit_expansion.areas. The tool schema enforces that returned names are",
+    "one of these (plus `*` for wildcard).",
+    "",
+    list,
+  ].join("\n");
 }
 
 async function runBA(
   issue: GitHubIssue,
   spec: SpecReadResult,
+  areas: AreasFile,
 ): Promise<{
   expansion: BAExpansion;
   model: ReturnType<typeof getModelByTier>;
@@ -292,10 +367,10 @@ async function runBA(
     `Issue #${issue.number}: ${issue.title}\n\n---\n\n${issue.body ?? "(no body)"}`;
 
   const result = await model.invoke({
-    system: buildSystemBlocks(spec),
+    system: buildSystemBlocks(spec, areas),
     messages: [{ role: "user", content: userMessage }],
     maxTokens: 2048,
-    tools: [SUBMIT_EXPANSION_TOOL],
+    tools: [buildSubmitExpansionTool(areas.areaNames)],
     toolChoice: { type: "tool", name: "submit_expansion" },
     temperature: 0,
   });
@@ -362,17 +437,30 @@ function fmtSpecFooter(spec: SpecReadResult, specPath: string): string {
   return `<sub>spec: ${spec.files.length} file${spec.files.length === 1 ? "" : "s"} from \`${specPath}\` (${kb} KB${trunc}).</sub>`;
 }
 
+type AreaSummary =
+  | { kind: "wildcard" }
+  | { kind: "concrete"; areaIds: string[] }
+  | { kind: "park"; reason: string };
+
 function buildComment(
   expansion: BAExpansion,
   spec: SpecReadResult,
   specPath: string,
   modelId: string,
   runId: string,
+  areaSummary: AreaSummary,
 ): string {
   const conflicted = expansion.spec_conflict.detected;
-  const transitionLine = conflicted
-    ? `**⚠️  Spec conflict detected — parking at \`human-needed\`.** Pipeline does NOT proceed to estimation or development. A human must resolve the conflict (revise the issue, amend the spec, or close as won't-do) and clear the \`human-needed\` label.`
-    : `Transitioning \`${STATE_LABELS.idea}\` → \`${STATE_LABELS.costEstimating}\`.`;
+  const areaParked = !conflicted && areaSummary.kind === "park";
+
+  let transitionLine: string;
+  if (conflicted) {
+    transitionLine = `**⚠️  Spec conflict detected — parking at \`human-needed\`.** Pipeline does NOT proceed to estimation or development. A human must resolve the conflict (revise the issue, amend the spec, or close as won't-do) and clear the \`human-needed\` label.`;
+  } else if (areaParked) {
+    transitionLine = `**⚠️  Couldn't map this issue to any declared area — parking at \`human-needed\` with \`${GAP_LABELS.areasIncomplete}\`.** Either extend \`.agent-forge/areas.yml\` to cover the scope or refine the issue, then clear the label.`;
+  } else {
+    transitionLine = `Transitioning \`${STATE_LABELS.idea}\` → \`${STATE_LABELS.costEstimating}\`.`;
+  }
 
   const conflictBlock = conflicted
     ? [
@@ -382,11 +470,19 @@ function buildComment(
       ]
     : [];
 
+  const areasLine =
+    areaSummary.kind === "wildcard"
+      ? `**Areas:** \`${AREA_ALL_LABEL}\` (wildcard — every declared area)`
+      : areaSummary.kind === "concrete"
+        ? `**Areas:** ${areaSummary.areaIds.map((a) => `\`area:${a}\``).join(", ")}`
+        : `**Areas:** _none matched_ — ${areaSummary.reason}`;
+
   return [
     `## BA expansion (run \`${runId}\`, ${modelId})`,
     "",
     ...conflictBlock,
     `**Complexity:** \`${expansion.complexity}\``,
+    areasLine,
     "",
     `### Acceptance criteria`,
     bullets(expansion.acceptance_criteria),
@@ -415,6 +511,7 @@ async function writeIssueState(args: {
   spec_path: string;
   model_id: string;
   run_id: string;
+  applied_areas: string[];
 }): Promise<void> {
   await putBAExpansion({
     tableName: ISSUE_STATE_TABLE,
@@ -422,6 +519,10 @@ async function writeIssueState(args: {
     issueNumber: ISSUE_NUMBER,
     expansion: {
       ...args.expansion,
+      // Store the *applied* areas (post-validation, post-wildcard-resolution)
+      // so downstream roles see what was actually labeled on the issue, not
+      // raw model output.
+      areas: args.applied_areas,
       model: args.model_id,
       run_id: args.run_id,
       spec: {
@@ -485,14 +586,68 @@ async function main(): Promise<void> {
     missing: spec.missing,
   });
 
+  const ghOpts = { token, userAgent: USER_AGENT };
   const runId = runIdFromEnv();
+
+  const areasResult = await readAreasFile({
+    token,
+    userAgent: USER_AGENT,
+    repo: REPO,
+    ...(product.areas_path ? { path: product.areas_path } : {}),
+  });
+
+  if (areasResult.missing) {
+    log({ msg: "areas.yml missing; parking without model call", path: areasResult.path });
+    await postComment(
+      ghOpts,
+      REPO,
+      ISSUE_NUMBER,
+      [
+        `## BA blocked (run \`${runId}\`)`,
+        "",
+        `Cannot expand this issue: \`${areasResult.path}\` is missing in the target repo.`,
+        "",
+        `Adding \`${GAP_LABELS.areasIncomplete}\` and parking at \`${HUMAN_NEEDED_LABEL}\`. ` +
+          "Commit `.agent-forge/areas.yml` per CLAUDE.md → Concurrency model, then clear the label.",
+      ].join("\n"),
+    );
+    await addLabels(ghOpts, REPO, ISSUE_NUMBER, [GAP_LABELS.areasIncomplete]);
+    await transitionLabel(
+      ghOpts,
+      REPO,
+      ISSUE_NUMBER,
+      STATE_LABELS.idea,
+      HUMAN_NEEDED_LABEL,
+    );
+    log({ msg: "parked: areas.yml missing" });
+    return;
+  }
+  log({
+    msg: "loaded areas.yml",
+    path: areasResult.path,
+    area_names: areasResult.areas.areaNames,
+  });
 
   const {
     expansion,
     model,
     costUsd: baCostUsd,
     usage,
-  } = await runBA(issue, spec);
+  } = await runBA(issue, spec, areasResult.areas);
+
+  const conflicted = expansion.spec_conflict.detected;
+  // Spec-conflict takes precedence: we don't apply area labels for a parked
+  // issue, but we still record what BA returned to issue_state for audit.
+  const areaDecision = conflicted
+    ? { kind: "park" as const, reason: "spec_conflict.detected" }
+    : chooseAreaLabels(expansion.areas ?? [], areasResult.areas.areaNames);
+
+  const appliedAreas =
+    areaDecision.kind === "wildcard"
+      ? ["*"]
+      : areaDecision.kind === "concrete"
+        ? areaDecision.areaIds
+        : [];
 
   await writeIssueState({
     expansion,
@@ -500,19 +655,33 @@ async function main(): Promise<void> {
     spec_path: specPath,
     model_id: model.bedrockModelId,
     run_id: runId,
+    applied_areas: appliedAreas,
   });
-  log({ msg: "wrote issue_state.ba_expansion" });
+  log({ msg: "wrote issue_state.ba_expansion", areas: appliedAreas });
+
+  const areaSummary: AreaSummary =
+    areaDecision.kind === "wildcard"
+      ? { kind: "wildcard" }
+      : areaDecision.kind === "concrete"
+        ? { kind: "concrete", areaIds: areaDecision.areaIds }
+        : { kind: "park", reason: areaDecision.reason };
 
   await postComment(
-    { token, userAgent: USER_AGENT },
+    ghOpts,
     REPO,
     ISSUE_NUMBER,
-    buildComment(expansion, spec, specPath, model.bedrockModelId, runId),
+    buildComment(
+      expansion,
+      spec,
+      specPath,
+      model.bedrockModelId,
+      runId,
+      areaSummary,
+    ),
   );
   log({ msg: "posted expansion comment" });
 
-  const ghOpts = { token, userAgent: USER_AGENT };
-  if (expansion.spec_conflict.detected) {
+  if (conflicted) {
     await transitionLabel(
       ghOpts,
       REPO,
@@ -525,7 +694,43 @@ async function main(): Promise<void> {
       msg: "spec conflict detected; parked at human-needed",
       reason: expansion.spec_conflict.reason,
     });
+  } else if (areaDecision.kind === "park") {
+    await addLabels(ghOpts, REPO, ISSUE_NUMBER, [GAP_LABELS.areasIncomplete]);
+    await transitionLabel(
+      ghOpts,
+      REPO,
+      ISSUE_NUMBER,
+      STATE_LABELS.idea,
+      HUMAN_NEEDED_LABEL,
+    );
+    log({ msg: "area mapping failed; parked at human-needed", reason: areaDecision.reason });
   } else {
+    // Apply area labels. For concrete labels, ensure each `area:<name>` exists
+    // before applying (the seed-labels script doesn't pre-seed per-product
+    // area names). `area:*` is in the canonical vocabulary and always seeded.
+    const labelsToApply: string[] =
+      areaDecision.kind === "wildcard"
+        ? [AREA_ALL_LABEL]
+        : areaDecision.areaIds.map((a) => `${AREA_LABEL_PREFIX}${a}`);
+
+    if (areaDecision.kind === "concrete") {
+      for (const areaId of areaDecision.areaIds) {
+        const created = await ensureLabel(
+          ghOpts,
+          REPO,
+          `${AREA_LABEL_PREFIX}${areaId}`,
+          AREA_LABEL_COLOR,
+          areaLabelDescription(areaId, areasResult.areas.paths[areaId] ?? []),
+        );
+        if (created) {
+          log({ msg: "created area label", area_id: areaId });
+        }
+      }
+    }
+
+    await addLabels(ghOpts, REPO, ISSUE_NUMBER, labelsToApply);
+    log({ msg: "applied area labels", labels: labelsToApply });
+
     await transitionLabel(
       ghOpts,
       REPO,
