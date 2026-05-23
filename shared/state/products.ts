@@ -35,6 +35,16 @@ export type ProductConfig = {
   functional_runtime_mode?: FunctionalRuntimeMode;
   cost_approval_threshold_usd?: number;
   concurrency_cap?: number;
+  // Per-attempt wall-clock cap for a Dev run. Doubles as the area-lock TTL when
+  // Dev acquires (the lock-holder always has at most this long before the lock
+  // self-releases via DynamoDB TTL). Defaults to 7200 (2h) at the agent layer.
+  // Slice B.1 declares the field; B.3 wires it through to the Fargate task.
+  dev_attempt_ttl_seconds?: number;
+  // Shell command Dev runs to verify the change before `submit_done`. Falls
+  // back to `npm test` when package.json is present, otherwise no-op (the
+  // agent is told no tests are configured and may submit without running any).
+  // Slice B.1 declares the field; B.3 wires it through to the agent loop.
+  test_command?: string;
   updated_at?: string;
 };
 

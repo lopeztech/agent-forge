@@ -116,6 +116,28 @@ export async function putBAExpansion(
   });
 }
 
+// Loads the BA expansion for an issue. Downstream roles (Cost Estimator, Dev)
+// gate on this — if BA never ran or got short-circuited at human-needed, the
+// expansion is absent and the caller can't make a structured decision.
+export async function getBAExpansion(
+  opts: GetIssueStateOpts,
+): Promise<BAExpansionState | undefined> {
+  const state = await getIssueState(opts);
+  return state?.ba_expansion;
+}
+
+export async function requireBAExpansion(
+  opts: GetIssueStateOpts,
+): Promise<BAExpansionState> {
+  const expansion = await getBAExpansion(opts);
+  if (!expansion) {
+    throw new Error(
+      `No BA expansion on issue_state for product=${opts.productId} issue=${opts.issueNumber}; BA must run before this role.`,
+    );
+  }
+  return expansion;
+}
+
 export type PutCostEstimateOpts = GetIssueStateOpts & {
   estimate: CostEstimateState;
   updatedAt?: Date;
