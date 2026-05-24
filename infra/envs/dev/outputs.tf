@@ -89,3 +89,18 @@ output "test_image_repository_url" {
   value       = module.ecr_test.repository_url
   description = "ECR repository the Test image is pushed to."
 }
+
+output "functional_state_machine_arn" {
+  value       = module.step_functions.functional_state_machine_arn
+  description = "Functional state machine ARN."
+}
+
+output "functional_task_log_group" {
+  value       = module.agent_functional.log_group_name
+  description = "CloudWatch log group for the Functional Fargate task's container output."
+}
+
+output "functional_image_repository_url" {
+  value       = module.ecr_functional.repository_url
+  description = "ECR repository the Functional image is pushed to."
+}
