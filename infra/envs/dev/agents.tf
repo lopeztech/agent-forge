@@ -127,9 +127,14 @@ module "agent_dev" {
     area_locks    = module.dynamodb.table_arns["area_locks"]
   }
 
-  # Slice B.1 wires the Sonnet 4.6 planning loop. Opus 4.6 escalation arns
-  # land alongside the iter:N → tier mapping in Slice B.4.
-  bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
+  # Complexity-driven tier routing (tierForDev): Haiku for trivial issues,
+  # Sonnet for small/medium (default), Opus for large + the attempt-3
+  # escalation. All three SKUs' profile + per-region foundation ARNs.
+  bedrock_model_arns = concat(
+    local.bedrock_invoke_arns["haiku-4-5"],
+    local.bedrock_invoke_arns["sonnet-4-6"],
+    local.bedrock_invoke_arns["opus-4-6"],
+  )
 }
 
 # Dev releases its own locks via DeleteItem; the agent-role module's base task

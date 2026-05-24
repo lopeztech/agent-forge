@@ -56,6 +56,8 @@ import { acquireAreaLocks } from "../../../shared/locks/area-locks.ts";
 import {
   costUsd,
   getModelByTier,
+  tierForDev,
+  type ModelTier,
   type SystemBlock,
   type ToolDefinition,
 } from "../../../shared/models.ts";
@@ -733,7 +735,19 @@ async function main(): Promise<void> {
       command: testCommand ?? "(none — finalize will skip tests)",
     });
 
-    const model = getModelByTier("sonnet-4-6");
+    // Tier driven by BA's complexity tag. B.4 will wire `attempt` to the
+    // iter:N label so kickbacks escalate; for now first-attempt only.
+    const tier: ModelTier = tierForDev({
+      complexity: baExpansion.complexity,
+      attempt: 1,
+    });
+    log({
+      msg: "selected model tier",
+      tier,
+      complexity: baExpansion.complexity ?? "(unset)",
+      attempt: 1,
+    });
+    const model = getModelByTier(tier);
     const userMessage = buildUserMessage({
       issue,
       baExpansion,
@@ -875,7 +889,7 @@ async function main(): Promise<void> {
       },
     });
 
-    const recomputed = costUsd("sonnet-4-6", {
+    const recomputed = costUsd(tier, {
       input: loop.usage.input_tokens,
       cached: loop.usage.cached_tokens,
       output: loop.usage.output_tokens,

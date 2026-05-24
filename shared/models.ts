@@ -82,6 +82,9 @@ export function defaultTier(role: RoleKey, attempt: number = 1): ModelTier {
     case "dev":
       // Sonnet on attempts 1..(cap-1), Opus on the final attempt.
       // Default kickback cap is 3 → attempt 3 escalates.
+      // Note: callers that have BA's complexity tag should use tierForDev()
+      // instead — it routes trivial issues to Haiku and large ones to Opus
+      // on attempt 1 without waiting for the kickback ladder.
       return attempt >= 3 ? "opus-4-6" : "sonnet-4-6";
     case "ba":
     case "test":
@@ -89,6 +92,61 @@ export function defaultTier(role: RoleKey, attempt: number = 1): ModelTier {
     case "security":
       return "sonnet-4-6";
   }
+}
+
+// ----------------------------------------------------------------------------
+// Dev-specific tier routing
+// ----------------------------------------------------------------------------
+
+export type DevTierContext = {
+  // BA's complexity tag (`trivial` | `small` | `medium` | `large`) from the
+  // submit_expansion tool. Unknown / unset values fall through to `sonnet-4-6`.
+  complexity?: string | undefined;
+  // 1-indexed Dev attempt counter (matches `iter:N` labels). Defaults to 1.
+  attempt?: number | undefined;
+};
+
+const TIER_ORDER: Record<ModelTier, number> = {
+  "haiku-4-5": 0,
+  "sonnet-4-6": 1,
+  "opus-4-6": 2,
+};
+
+function maxTier(a: ModelTier, b: ModelTier): ModelTier {
+  return TIER_ORDER[a] >= TIER_ORDER[b] ? a : b;
+}
+
+function complexityTier(complexity: string | undefined): ModelTier {
+  switch (complexity) {
+    case "trivial":
+      return "haiku-4-5";
+    case "large":
+      return "opus-4-6";
+    // small, medium, unknown, unset → Sonnet default
+    default:
+      return "sonnet-4-6";
+  }
+}
+
+// Picks Dev's Bedrock tier from BA's complexity tag and the attempt number.
+//
+// Attempt 1: pure complexity-driven. Trivial scope rides Haiku (substantial
+//   cost saving on routine docs/config changes); large rides Opus from the
+//   start (avoids attempt-1 failure on cross-cutting work that Sonnet would
+//   struggle with).
+//
+// Attempt 2: a kickback says BA undersized the issue. Floor at Sonnet so we
+//   never reattempt on Haiku; but if complexity was already large, stay on
+//   Opus.
+//
+// Attempt 3: hard escalate to Opus regardless. This is the "last swing with
+//   the best model" rule from CLAUDE.md → Failure handling.
+export function tierForDev(ctx: DevTierContext = {}): ModelTier {
+  const attempt = ctx.attempt ?? 1;
+  if (attempt >= 3) return "opus-4-6";
+  const ct = complexityTier(ctx.complexity);
+  if (attempt >= 2) return maxTier(ct, "sonnet-4-6");
+  return ct;
 }
 
 // ----------------------------------------------------------------------------
