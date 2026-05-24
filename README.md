@@ -49,7 +49,7 @@ For the product and role-level spec, see:
 
 ## Prerequisites
 
-- Node.js 22 or newer
+- Node.js 22.6.0 or newer
 - npm
 - Terraform `1.10.0`
 - GitHub CLI authenticated with `repo`, `workflow`, and `read:org` scopes
