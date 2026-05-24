@@ -1,66 +1,57 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { normalizePlan } from "../agents/dev/src/plan.ts";
+import { normalizeSubmission } from "../agents/dev/src/plan.ts";
 
-describe("normalizePlan", () => {
-  it("passes through a fully-formed plan unchanged", () => {
-    const plan = {
-      summary: "Add a Testing section",
-      steps: ["Read package.json", "Append section to README.md"],
-      files_to_touch: ["README.md"],
-      open_questions: ["Section heading level?"],
+describe("normalizeSubmission", () => {
+  it("passes through a fully-formed submission unchanged", () => {
+    const sub = {
+      summary: "Add Testing section to README.md",
+      pr_title: "Add Testing section to README.md",
+      pr_body: "Closes #38\n\nLists all six npm scripts.",
     };
-    assert.deepEqual(normalizePlan(plan), plan);
+    assert.deepEqual(normalizeSubmission(sub), sub);
   });
 
   it("defaults missing summary to a placeholder string", () => {
-    const r = normalizePlan({
-      steps: ["a"],
-      files_to_touch: [],
-      open_questions: [],
-    });
+    const r = normalizeSubmission({ pr_title: "x", pr_body: "y" });
     assert.equal(r.summary, "(no summary)");
   });
 
-  it("converts missing array fields to empty arrays (the regression that crashed B.2)", () => {
-    const r = normalizePlan({ summary: "x" });
-    assert.deepEqual(r.steps, []);
-    assert.deepEqual(r.files_to_touch, []);
-    assert.deepEqual(r.open_questions, []);
+  it("defaults missing pr_title to a placeholder string", () => {
+    const r = normalizeSubmission({ summary: "x", pr_body: "y" });
+    assert.equal(r.pr_title, "(no title)");
   });
 
-  it("filters out non-string entries from arrays", () => {
-    const r = normalizePlan({
-      summary: "x",
-      steps: ["good", 42, null, "also good"],
-      files_to_touch: [{ obj: true }, "README.md"],
-      open_questions: [],
-    });
-    assert.deepEqual(r.steps, ["good", "also good"]);
-    assert.deepEqual(r.files_to_touch, ["README.md"]);
+  it("defaults missing pr_body to an empty string", () => {
+    const r = normalizeSubmission({ summary: "x", pr_title: "y" });
+    assert.equal(r.pr_body, "");
   });
 
-  it("treats a non-array as an empty array (e.g. model returned a single string)", () => {
-    const r = normalizePlan({
-      summary: "x",
-      steps: "1. do thing\n2. do other thing",
-      files_to_touch: null,
-      open_questions: undefined,
+  it("rejects empty-string values (uses fallback instead)", () => {
+    const r = normalizeSubmission({ summary: "", pr_title: "", pr_body: "" });
+    assert.equal(r.summary, "(no summary)");
+    assert.equal(r.pr_title, "(no title)");
+    assert.equal(r.pr_body, "");
+  });
+
+  it("handles non-string types by falling back", () => {
+    const r = normalizeSubmission({
+      summary: 42,
+      pr_title: null,
+      pr_body: { obj: "weird" },
     });
-    assert.deepEqual(r.steps, []);
-    assert.deepEqual(r.files_to_touch, []);
-    assert.deepEqual(r.open_questions, []);
+    assert.equal(r.summary, "(no summary)");
+    assert.equal(r.pr_title, "(no title)");
+    assert.equal(r.pr_body, "");
   });
 
   it("handles null / undefined input safely", () => {
-    const fromNull = normalizePlan(null);
-    const fromUndefined = normalizePlan(undefined);
-    for (const r of [fromNull, fromUndefined]) {
+    for (const v of [null, undefined]) {
+      const r = normalizeSubmission(v);
       assert.equal(r.summary, "(no summary)");
-      assert.deepEqual(r.steps, []);
-      assert.deepEqual(r.files_to_touch, []);
-      assert.deepEqual(r.open_questions, []);
+      assert.equal(r.pr_title, "(no title)");
+      assert.equal(r.pr_body, "");
     }
   });
 });

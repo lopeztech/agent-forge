@@ -34,6 +34,11 @@ export type ToolResult = {
   // Mark the tool's result as an error so the model knows to recover instead
   // of treating the empty/short output as a success signal.
   is_error?: boolean;
+  // Conditional terminal: overrides `terminalTools` list membership for this
+  // call. Use `terminate: false` for tools that may run-and-fail (e.g. Dev's
+  // submit_done when test_command exits non-zero — agent should keep going
+  // and try again). Defaults to `terminalTools.has(name)`.
+  terminate?: boolean;
 };
 
 export type AgentLoopStopReason =
@@ -168,7 +173,10 @@ export async function runAgentLoop(
         content: r.content,
         ...(r.is_error ? { is_error: true } : {}),
       });
-      if (terminalSet.has(call.name)) sawTerminal = true;
+      // Explicit `terminate` overrides the terminalTools list (per-call).
+      // Falls back to list membership when undefined.
+      const isTerminal = r.terminate ?? terminalSet.has(call.name);
+      if (isTerminal) sawTerminal = true;
     }
     messages.push({ role: "user", content: resultBlocks });
 

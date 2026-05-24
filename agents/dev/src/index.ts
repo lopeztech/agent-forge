@@ -1,29 +1,37 @@
-// Dev (Developer) — Slice B.2: clone target repo + read tools.
+// Dev (Developer) — Slice B.3: code changes + git push + PR open.
 //
 // Trigger: issue gets label `state:ready`. EventBridge → Step Function → this
 // Fargate task. Env vars come from RunTask container overrides
 // (see infra/modules/step-functions/asl/dev-issue-lifecycle.asl.json).
 //
-// B.2 extends B.1 by giving the agent a real view of the target repo. After
-// area-lock acquisition the wrapper shallow-clones the default branch into
-// /tmp/<runId> and exposes `read_file`, `list_directory`, and `grep` tools
-// alongside `propose_plan`. The plan now cites concrete files and reflects
-// what the agent actually saw, not just inference from issue body + spec.
+// B.3 makes Dev actually do the work. After area-lock acquisition:
+//   1. shallow-clone the target repo's default branch into /tmp/<runId>
+//   2. configure git (committer name/email per role) + check out a fresh
+//      feature branch `agent-forge/dev/issue-<N>`
+//   3. run a Sonnet 4.6 loop with read tools (read_file/list_directory/grep),
+//      write tools (write_file/bash), and a terminal `submit_done` tool
+//   4. on submit_done: auto-commit any uncommitted tree state with the
+//      agent's submission summary, run product.test_command (or npm test
+//      fallback when package.json exists), push the branch, open the PR,
+//      transition state:ready → state:awaiting-tests.
 //
-// Branch behaviours (unchanged from B.1 except for the clone step):
+// If submit_done fails partway (no changes, tests failed, push refused, PR
+// API non-2xx), the wrapper returns the error to the agent with terminate=false
+// (for changes/tests) or terminate=true (for infra-level failures), so the
+// agent gets another shot at the recoverable cases.
+//
+// Branch behaviours:
 //   1. No `area:*` labels at all              → park with gap:areas-incomplete.
 //   2. `area:*` and areas.yml missing         → park with gap:areas-incomplete.
-//   3. Concrete or area:* (expanded) areas    → acquire locks → clone repo →
-//      Sonnet 4.6 loop with read tools + `propose_plan` (terminal) → post
-//      plan comment → park at `human-needed` → release locks + cleanup
-//      workdir → record spend.
+//   3. Concrete or area:* (expanded) areas    → acquire locks → clone + setup →
+//      Sonnet 4.6 loop → submit_done flow → either PR-shipped or human-needed
+//      → release locks + cleanup workdir → record spend.
 //   4. Lock contention                        → park at `human-needed`.
 //
 // Out of scope this slice (deliberate):
-//   - File writes / branch / commit / push / PR open (B.3)
-//   - bash tool (B.3)
-//   - Sonnet → Opus escalation on attempt N (B.4)
+//   - iter:N attempt counter + Sonnet → Opus escalation (B.4)
 //   - Per-issue budget cap check before model call (B.4)
+//   - Kickback handling for failed PRs (B.4)
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { recordSpend } from "../../../shared/budget.ts";
@@ -58,8 +66,10 @@ import {
   requireWriterInstallId,
   type ProductConfig,
 } from "../../../shared/state/products.ts";
-import { normalizePlan, type ProposedPlan } from "./plan.ts";
+import { finalize, setupWorkdir, type FinalizeResult } from "./finalize.ts";
+import { normalizeSubmission, type Submission } from "./plan.ts";
 import { buildReadToolDefinitions, dispatchReadTool } from "./tools.ts";
+import { buildWriteToolDefinitions, dispatchWriteTool } from "./write-tools.ts";
 import { cloneTargetRepo, type ClonedWorkdir } from "./workdir.ts";
 
 // ---------------------------------------------------------------------------
@@ -168,54 +178,40 @@ function commentMissingAreasYaml(runId: string, areasPath: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Sonnet 4.6 tool-use: propose_plan
+// Sonnet 4.6 tool-use: submit_done
 // ---------------------------------------------------------------------------
 
-
-const PROPOSE_PLAN_TOOL: ToolDefinition = {
-  name: "propose_plan",
+const SUBMIT_DONE_TOOL: ToolDefinition = {
+  name: "submit_done",
   description:
-    "Submit a concrete implementation plan for this issue. Call this exactly " +
-    "once when you're ready to hand off; you do NOT execute the plan in this " +
-    "slice. Steps should be the order a Dev would take, not abstract phases.",
+    "Declare that the code change is complete and ready to ship. The wrapper " +
+    "will auto-commit any uncommitted working-tree changes using your summary " +
+    "as the commit message, run the product's test command, push the branch, " +
+    "and open a pull request. If tests fail or no changes exist, the wrapper " +
+    "returns an error and you can keep working — submit_done is only TERMINAL " +
+    "on success. Do not call submit_done before you've made the change.",
   input_schema: {
     type: "object",
     additionalProperties: false,
-    required: ["summary", "steps", "files_to_touch", "open_questions"],
+    required: ["summary", "pr_title", "pr_body"],
     properties: {
       summary: {
         type: "string",
         description:
-          "1-2 sentence overview of the change. Lead with what the user-facing " +
-          "or system-facing outcome will be, not the mechanism.",
+          "1-2 sentence high-level description. Used as the auto-commit message " +
+          "and as the lead paragraph of the PR body.",
       },
-      steps: {
-        type: "array",
-        minItems: 1,
-        maxItems: 20,
-        items: { type: "string" },
+      pr_title: {
+        type: "string",
         description:
-          "Concrete implementation steps in execution order. Each step should " +
-          "name the file(s) and operation (e.g. 'Add foo() to src/x.ts and call " +
-          "it from src/y.ts:42'). No 'investigate' / 'understand' steps.",
+          "GitHub PR title. Lead with a verb in imperative mood (\"Add\", \"Fix\", " +
+          "\"Refactor\"). Under 70 chars when possible.",
       },
-      files_to_touch: {
-        type: "array",
-        maxItems: 30,
-        items: { type: "string" },
+      pr_body: {
+        type: "string",
         description:
-          "Best-effort guess at the files this change will create or modify. " +
-          "Empty array is fine when you genuinely can't tell without reading " +
-          "the code (file-reading tools land in the next slice).",
-      },
-      open_questions: {
-        type: "array",
-        maxItems: 8,
-        items: { type: "string" },
-        description:
-          "Specific things you'd need to verify or decide before implementing — " +
-          "ambiguities in the BA expansion, missing spec context, two reasonable " +
-          "approaches, etc. Empty array when the plan is unambiguous.",
+          "GitHub PR body in Markdown. Cover what changed and why; reference " +
+          "the issue you're closing. The wrapper appends an attribution footer.",
       },
     },
   },
@@ -223,43 +219,47 @@ const PROPOSE_PLAN_TOOL: ToolDefinition = {
 
 const BASE_SYSTEM_PROMPT = `
 You are agent-forge's Developer (Dev) role. Your job is to take a structured
-issue (already expanded by BA, already cost-approved) and turn it into a code
-change against the target product repository.
+issue (already expanded by BA, already cost-approved) and produce the actual
+code change against the target product repository.
 
-This run is the "planning slice". A shallow clone of the target repo is
-available; you have three read tools:
+A shallow clone of the target repo is available at the working directory.
+A fresh feature branch has already been created and checked out for you, so
+your commits/edits stack on top of the default branch. You have these tools:
 
-- list_directory(path)   — enumerate immediate children. Heavy build/cache
-                           directories (node_modules, .git, dist, .terraform,
-                           etc.) are skipped automatically.
-- grep(pattern, path)    — recursive regex search for symbols / strings.
-                           Returns "path:lineno: content" lines.
-- read_file(path)        — fetch one file's contents (capped at 100 KB;
-                           binary files refused).
+- list_directory(path)             — enumerate children, skipping heavy dirs.
+- grep(pattern, path)              — recursive regex search.
+- read_file(path)                  — fetch one file (100 KB cap).
+- write_file(path, content)        — overwrite or create a file (1 MB cap).
+- bash(cmd, cwd?, timeout_seconds?) — run /bin/bash -c; cwd defaults to repo
+                                     root. Use for tests, lint, sed/awk
+                                     edits, multi-file ops, git inspection.
+- submit_done(summary, pr_title, pr_body) — TERMINAL on success: wrapper
+                                     auto-commits any uncommitted changes,
+                                     runs the test command, pushes the
+                                     branch, opens the PR. If tests fail or
+                                     no changes exist, you get an error and
+                                     the loop continues — fix and retry.
 
-Investigate before planning. Don't speculate about file contents you haven't
-read. A useful loop:
+Recommended flow:
 
-  1. list_directory(".") to see the repo layout.
-  2. grep / list_directory under the area(s) you hold locks on.
-  3. read_file the specific files your plan will touch.
-  4. Call propose_plan with concrete file paths in files_to_touch.
+  1. list_directory + grep + read_file the affected paths under your locked
+     areas. Don't guess about file contents — read them.
+  2. write_file (or bash with sed/awk) to make the change.
+  3. bash to run the test command yourself (typically \`npm test\`,
+     \`pytest\`, etc. — derive from the project). Iterate until green.
+  4. Call submit_done with a concise summary + PR title/body.
 
-When you're satisfied, call propose_plan exactly once. propose_plan is
-TERMINAL — the loop exits after it. Do not call it speculatively; once you
-call it, you're done.
+Constraints:
+- Stay within your locked areas. The wrapper does not enforce this, but the
+  Product Owner reviews against it; cross-area edits get kicked back.
+- One feature branch, one PR. Don't push or open PRs yourself via bash —
+  let submit_done do it. (You CAN run git commit yourself if you want
+  multiple atomic commits; the wrapper will add any leftover working-tree
+  changes as a final commit.)
+- Do not exfiltrate secrets via bash. The Fargate task has IAM credentials
+  reachable via instance metadata; treat that surface as off-limits.
 
-Style:
-- Be concrete. "Add foo() in src/x.ts:42 and call it from src/y.ts:113" beats
-  "implement the feature".
-- Cite spec sections or BA acceptance criteria when they constrain a choice.
-- If two approaches are reasonable, pick the one most consistent with what's
-  already in the spec and mention the alternative as an open question.
-- Stay within your locked areas. If your plan needs to touch outside them,
-  surface that as an open question, not a step.
-
-You MUST call propose_plan exactly once. Do not produce any free-form text
-response outside of the tool-call exchange.
+Do not produce free-form text outside the tool-call exchange.
 `.trim();
 
 function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
@@ -306,12 +306,18 @@ function buildUserMessage(args: {
   issue: GitHubIssue;
   baExpansion: Awaited<ReturnType<typeof requireBAExpansion>>;
   lockedAreaIds: string[];
+  branchName: string;
+  defaultBranch: string;
+  testCommand: string | undefined;
 }): string {
   const ac = (args.baExpansion.acceptance_criteria ?? [])
     .map((c, i) => `${i + 1}. ${c}`)
     .join("\n");
   const risks = (args.baExpansion.risks ?? []).map((r) => `- ${r}`).join("\n") || "_(none)_";
   const oos = (args.baExpansion.out_of_scope ?? []).map((s) => `- ${s}`).join("\n") || "_(none)_";
+  const testLine = args.testCommand
+    ? `**Test command** (the wrapper will re-run before opening the PR): \`${args.testCommand}\``
+    : "**Test command:** _none configured for this product — submit_done will not run tests. You should still verify your change manually._";
 
   return [
     `Issue #${args.issue.number}: ${args.issue.title}`,
@@ -331,61 +337,190 @@ function buildUserMessage(args: {
     "### Out of scope per BA",
     oos,
     "",
+    "## Workspace",
+    `You're on branch \`${args.branchName}\`, branched from \`${args.defaultBranch}\`. The PR opens against \`${args.defaultBranch}\` when you call submit_done.`,
+    "",
+    testLine,
+    "",
     "## Locked areas",
     `You hold area locks on: ${args.lockedAreaIds.map((a) => `\`${a}\``).join(", ")}.`,
-    "Stay within those areas; if your plan needs to touch outside them, surface that as an open question.",
+    "Stay within those areas; if you need to touch outside them, surface it in submit_done.pr_body so the PO can decide.",
   ].join("\n");
 }
 
-function commentPlanPosted(
-  runId: string,
-  modelId: string,
-  plan: ProposedPlan,
-  lockedAreaIds: string[],
-  turns: number,
-): string {
-  const bullets = (xs: string[], fallback = "_(none)_") =>
-    xs.length === 0 ? fallback : xs.map((s) => `- ${s}`).join("\n");
-  const numbered = (xs: string[], fallback = "_(none)_") =>
-    xs.length === 0 ? fallback : xs.map((s, i) => `${i + 1}. ${s}`).join("\n");
+// ---------------------------------------------------------------------------
+// Tool dispatch helpers
+// ---------------------------------------------------------------------------
 
+const TOOL_OUTPUT_CAP_BYTES = 16384;
+
+type DispatcherResult = { content: string; is_error?: boolean };
+
+function wrapToolResult(
+  callId: string,
+  r: DispatcherResult,
+): {
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+} {
+  const out =
+    r.content.length > TOOL_OUTPUT_CAP_BYTES
+      ? `${r.content.slice(0, TOOL_OUTPUT_CAP_BYTES)}\n[... tool output truncated at ${TOOL_OUTPUT_CAP_BYTES} bytes ...]`
+      : r.content;
+  const wrapped: { tool_use_id: string; content: string; is_error?: boolean } = {
+    tool_use_id: callId,
+    content: out,
+  };
+  if (r.is_error) wrapped.is_error = true;
+  return wrapped;
+}
+
+function handleFinalizeResult(
+  callId: string,
+  f: FinalizeResult,
+): {
+  tool_use_id: string;
+  content: string;
+  is_error?: boolean;
+  terminate?: boolean;
+} {
+  switch (f.kind) {
+    case "ok":
+      return {
+        tool_use_id: callId,
+        content: `PR opened: ${f.prUrl} (#${f.prNumber}). The loop ends here.`,
+        terminate: true,
+      };
+    case "no_changes":
+      return {
+        tool_use_id: callId,
+        content:
+          "No changes detected in the workdir (no commits, no uncommitted edits). " +
+          "Use write_file or bash (sed/awk/etc.) to make your change, then call submit_done again.",
+        is_error: true,
+        terminate: false,
+      };
+    case "tests_failed":
+      return {
+        tool_use_id: callId,
+        content:
+          "Tests failed after the wrapper auto-committed your changes. " +
+          "Fix the failures and call submit_done again. Tail of test output:\n\n" +
+          f.output,
+        is_error: true,
+        terminate: false,
+      };
+    case "push_failed":
+      // Infra-level failure; don't burn more agent turns trying to recover.
+      return {
+        tool_use_id: callId,
+        content: `git push failed: ${f.output}`,
+        is_error: true,
+        terminate: true,
+      };
+    case "pr_failed":
+      return {
+        tool_use_id: callId,
+        content: `PR creation failed (HTTP ${f.status}): ${f.body.slice(0, 500)}`,
+        is_error: true,
+        terminate: true,
+      };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Test command resolution + PR body composition
+// ---------------------------------------------------------------------------
+
+async function resolveTestCommand(
+  workdir: string,
+  configured: string | undefined,
+): Promise<string | undefined> {
+  if (configured && configured.trim().length > 0) return configured;
+  try {
+    const stat = await import("node:fs/promises").then((m) => m.stat);
+    await stat(`${workdir}/package.json`);
+    return "npm test";
+  } catch {
+    return undefined;
+  }
+}
+
+function buildPrBody(agentBody: string, issueNumber: number): string {
+  const closes = `Closes #${issueNumber}.`;
+  const footer =
+    "\n\n---\n\n_Opened by agent-forge Dev role. Test Engineer picks this up next via `state:awaiting-tests`._";
+  // If the agent already cited the issue, don't duplicate.
+  const includesClose = /#\d+/.test(agentBody) && agentBody.includes(`${issueNumber}`);
+  const header = includesClose ? "" : `${closes}\n\n`;
+  return `${header}${agentBody}${footer}`;
+}
+
+function commentPRShipped(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  lockedAreaIds: string[];
+  submission: Submission;
+  pr: { prNumber: number; prUrl: string };
+}): string {
   return [
-    `## Dev plan (Slice B.2, run \`${runId}\`, ${modelId}, ${turns} turn${turns === 1 ? "" : "s"})`,
+    `## Dev shipped (Slice B.3, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
     "",
-    `Locked areas: ${lockedAreaIds.map((a) => `\`${a}\``).join(", ")}`,
+    `Locked areas: ${args.lockedAreaIds.map((a) => `\`${a}\``).join(", ")}`,
     "",
-    plan.summary,
+    args.submission.summary,
     "",
-    "### Implementation steps",
-    numbered(plan.steps),
+    `Opened PR: ${args.pr.prUrl} (#${args.pr.prNumber}).`,
     "",
-    "### Files this is expected to touch",
-    plan.files_to_touch.length === 0
-      ? "_(none cited)_"
-      : plan.files_to_touch.map((f) => `- \`${f}\``).join("\n"),
-    "",
-    "### Open questions",
-    bullets(plan.open_questions),
-    "",
-    `Parking at \`${HUMAN_NEEDED_LABEL}\` — actual code generation lands in Slice B.3.`,
-    "",
-    "<sub>Slice B.2 reads the target repo via shallow clone + read_file/list_directory/grep tools; no files were modified.</sub>",
+    `Transitioning \`${STATE_LABELS.ready}\` → \`${STATE_LABELS.awaitingTests}\`. The Test Engineer picks this up next.`,
   ].join("\n");
 }
 
-function commentAgentDidNotPlan(
-  runId: string,
-  modelId: string,
-  stopReason: string,
-  turns: number,
-): string {
-  return [
-    `## Dev plan (Slice B.2, run \`${runId}\`, ${modelId})`,
+function commentFinalizeFailed(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  stopReason: string;
+  lockedAreaIds: string[];
+  finalize: FinalizeResult | undefined;
+}): string {
+  const lockedLine = `Locked areas: ${args.lockedAreaIds.map((a) => `\`${a}\``).join(", ")}`;
+  const lines = [
+    `## Dev did not ship (Slice B.3, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"}, stop=\`${args.stopReason}\`)`,
     "",
-    `Agent finished without calling \`propose_plan\` (stop reason: \`${stopReason}\`, ${turns} turn${turns === 1 ? "" : "s"}).`,
+    lockedLine,
     "",
-    `Parking at \`${HUMAN_NEEDED_LABEL}\`. Re-run by re-applying \`${STATE_LABELS.ready}\` once you've adjusted the issue / spec.`,
-  ].join("\n");
+  ];
+  const f = args.finalize;
+  if (!f) {
+    lines.push(
+      `Agent exited without calling \`submit_done\`. Parking at \`${HUMAN_NEEDED_LABEL}\`.`,
+    );
+  } else if (f.kind === "no_changes") {
+    lines.push(
+      "Agent called `submit_done` but the workdir had no changes (no commits, no uncommitted edits).",
+    );
+  } else if (f.kind === "tests_failed") {
+    lines.push("Tests failed during finalize:\n");
+    lines.push("```");
+    lines.push(f.output);
+    lines.push("```");
+  } else if (f.kind === "push_failed") {
+    lines.push("git push failed:\n");
+    lines.push("```");
+    lines.push(f.output);
+    lines.push("```");
+  } else if (f.kind === "pr_failed") {
+    lines.push(`PR creation failed (HTTP ${f.status}):\n`);
+    lines.push("```");
+    lines.push(f.body.slice(0, 1500));
+    lines.push("```");
+  }
+  lines.push("");
+  lines.push(`Parking at \`${HUMAN_NEEDED_LABEL}\`.`);
+  return lines.join("\n");
 }
 
 function commentLockContended(
@@ -547,14 +682,26 @@ async function main(): Promise<void> {
   });
 
   let workdir: ClonedWorkdir | undefined;
+  let finalizeResult: FinalizeResult | undefined;
   try {
-    // Clone target repo into /tmp/<runId> so the agent's read tools have
-    // something to point at. Shallow + single-branch for speed; we don't
-    // commit or push in B.2.
+    // 1. Clone the target repo's default branch.
     workdir = await cloneTargetRepo({ token, repo: REPO, runId });
     log({ msg: "cloned target repo", workdir: workdir.path });
 
-    // Read BA expansion + spec → run the Sonnet 4.6 planning loop.
+    // 2. Configure git committer (per-role audit hook on author.email) and
+    //    check out a fresh feature branch.
+    const branchName = `agent-forge/dev/issue-${ISSUE_NUMBER}`;
+    const { defaultBranch } = await setupWorkdir({
+      workdir: workdir.path,
+      identity: {
+        name: `agent-forge-${ROLE}[bot]`,
+        email: `${ROLE}@agent-forge-${ENV}.local`,
+      },
+      branchName,
+    });
+    log({ msg: "set up workdir", branch: branchName, default_branch: defaultBranch });
+
+    // 3. Read BA expansion + spec for context.
     const baExpansion = await requireBAExpansion({
       tableName: ISSUE_STATE_TABLE,
       productId: PRODUCT_ID,
@@ -578,57 +725,78 @@ async function main(): Promise<void> {
       missing: spec.missing,
     });
 
+    // 4. Resolve test command per Q5: explicit product config wins; npm test
+    //    fallback when package.json exists; otherwise skip.
+    const testCommand = await resolveTestCommand(workdir.path, product.test_command);
+    log({
+      msg: "resolved test_command",
+      command: testCommand ?? "(none — finalize will skip tests)",
+    });
+
     const model = getModelByTier("sonnet-4-6");
     const userMessage = buildUserMessage({
       issue,
       baExpansion,
       lockedAreaIds: result.lease.areaIds,
+      branchName,
+      defaultBranch,
+      testCommand,
     });
 
-    let capturedPlan: ProposedPlan | undefined;
+    let capturedSubmission: Submission | undefined;
     const toolCallCounts: Record<string, number> = {};
     const wd = workdir.path;
     const executeTool = async (call: ToolCall) => {
       toolCallCounts[call.name] = (toolCallCounts[call.name] ?? 0) + 1;
-      if (call.name === "propose_plan") {
-        capturedPlan = normalizePlan(call.input);
-        // Log the raw input alongside the normalized version so we can spot
-        // schema-bending from the model in CloudWatch.
+      if (call.name === "submit_done") {
+        const submission = normalizeSubmission(call.input);
+        capturedSubmission = submission;
         log({
-          msg: "propose_plan received",
+          msg: "submit_done received",
           raw: call.input,
-          normalized: capturedPlan,
+          normalized: submission,
         });
-        return { tool_use_id: call.id, content: "plan recorded" };
+        const f = await finalize({
+          workdir: wd,
+          branchName,
+          defaultBranch,
+          commitMessage: submission.summary,
+          ...(testCommand ? { testCommand } : {}),
+          token,
+          repo: REPO,
+          userAgent: USER_AGENT,
+          prTitle: submission.pr_title,
+          prBody: buildPrBody(submission.pr_body, ISSUE_NUMBER),
+        });
+        finalizeResult = f;
+        return handleFinalizeResult(call.id, f);
       }
-      const dispatched = await dispatchReadTool(wd, call.name, call.input);
-      if (dispatched) {
-        const out =
-          dispatched.content.length > 16384
-            ? `${dispatched.content.slice(0, 16384)}\n[... tool output truncated at 16 KB ...]`
-            : dispatched.content;
-        const result: { tool_use_id: string; content: string; is_error?: boolean } = {
-          tool_use_id: call.id,
-          content: out,
-        };
-        if (dispatched.is_error) result.is_error = true;
-        return result;
-      }
+      const read = await dispatchReadTool(wd, call.name, call.input);
+      if (read) return wrapToolResult(call.id, read);
+      const write = await dispatchWriteTool(wd, call.name, call.input);
+      if (write) return wrapToolResult(call.id, write);
       return {
         tool_use_id: call.id,
-        content: `Unknown tool: ${call.name}. Call one of read_file, list_directory, grep, or propose_plan.`,
+        content:
+          `Unknown tool: ${call.name}. ` +
+          "Call one of read_file, list_directory, grep, write_file, bash, or submit_done.",
         is_error: true,
       };
     };
 
-    const tools = [...buildReadToolDefinitions(), PROPOSE_PLAN_TOOL];
+    const tools = [
+      ...buildReadToolDefinitions(),
+      ...buildWriteToolDefinitions(),
+      SUBMIT_DONE_TOOL,
+    ];
     const loop = await runAgentLoop({
       model,
       system: buildSystemBlocks(spec),
       initialMessages: [{ role: "user", content: userMessage }],
       tools,
       executeTool,
-      terminalTools: ["propose_plan"],
+      // submit_done is conditionally terminal — handleFinalizeResult sets
+      // `terminate` per call. No global terminalTools list needed.
       maxTurns: AGENT_MAX_TURNS,
       maxTokensPerTurn: AGENT_MAX_TOKENS_PER_TURN,
       temperature: 0,
@@ -641,42 +809,56 @@ async function main(): Promise<void> {
       tool_calls: toolCallCounts,
       usage: loop.usage,
       cost_usd: loop.costUsd,
+      finalize_kind: finalizeResult?.kind,
     });
 
-    if (capturedPlan && loop.stopReason === "terminal_tool") {
+    if (
+      finalizeResult !== undefined &&
+      finalizeResult.kind === "ok" &&
+      capturedSubmission !== undefined
+    ) {
       await postComment(
         ghOpts,
         REPO,
         ISSUE_NUMBER,
-        commentPlanPosted(
+        commentPRShipped({
           runId,
-          model.bedrockModelId,
-          capturedPlan,
-          result.lease.areaIds,
-          loop.turns,
-        ),
+          modelId: model.bedrockModelId,
+          turns: loop.turns,
+          lockedAreaIds: result.lease.areaIds,
+          submission: capturedSubmission,
+          pr: { prNumber: finalizeResult.prNumber, prUrl: finalizeResult.prUrl },
+        }),
+      );
+      await transitionLabel(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        STATE_LABELS.ready,
+        STATE_LABELS.awaitingTests,
       );
     } else {
       await postComment(
         ghOpts,
         REPO,
         ISSUE_NUMBER,
-        commentAgentDidNotPlan(
+        commentFinalizeFailed({
           runId,
-          model.bedrockModelId,
-          loop.stopReason,
-          loop.turns,
-        ),
+          modelId: model.bedrockModelId,
+          turns: loop.turns,
+          stopReason: loop.stopReason,
+          lockedAreaIds: result.lease.areaIds,
+          finalize: finalizeResult,
+        }),
+      );
+      await transitionLabel(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        STATE_LABELS.ready,
+        HUMAN_NEEDED_LABEL,
       );
     }
-
-    await transitionLabel(
-      ghOpts,
-      REPO,
-      ISSUE_NUMBER,
-      STATE_LABELS.ready,
-      HUMAN_NEEDED_LABEL,
-    );
 
     await recordSpend({
       tableName: BUDGET_LEDGER_TABLE,
