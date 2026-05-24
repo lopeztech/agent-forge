@@ -104,3 +104,18 @@ output "functional_image_repository_url" {
   value       = module.ecr_functional.repository_url
   description = "ECR repository the Functional image is pushed to."
 }
+
+output "security_state_machine_arn" {
+  value       = module.step_functions.security_state_machine_arn
+  description = "Security state machine ARN."
+}
+
+output "security_task_log_group" {
+  value       = module.agent_security.log_group_name
+  description = "CloudWatch log group for the Security Fargate task's container output."
+}
+
+output "security_image_repository_url" {
+  value       = module.ecr_security.repository_url
+  description = "ECR repository the Security image is pushed to."
+}

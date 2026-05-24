@@ -3,6 +3,7 @@ locals {
   dev_state_machine_name        = "${var.name_prefix}-dev-issue-lifecycle"
   test_state_machine_name       = "${var.name_prefix}-test-issue-lifecycle"
   functional_state_machine_name = "${var.name_prefix}-functional-issue-lifecycle"
+  security_state_machine_name   = "${var.name_prefix}-security-issue-lifecycle"
 }
 
 # ------------------------------------------------------------------------------
@@ -430,6 +431,107 @@ resource "aws_sfn_state_machine" "functional" {
 
   logging_configuration {
     log_destination        = "${aws_cloudwatch_log_group.functional.arn}:*"
+    include_execution_data = true
+    level                  = "ALL"
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Security state machine
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "security" {
+  name              = "/aws/states/${local.security_state_machine_name}"
+  retention_in_days = var.log_retention_days
+}
+
+resource "aws_iam_role" "security" {
+  name               = "${local.security_state_machine_name}-role"
+  assume_role_policy = data.aws_iam_policy_document.assume.json
+}
+
+data "aws_iam_policy_document" "security" {
+  statement {
+    sid       = "RunSecurityTask"
+    actions   = ["ecs:RunTask"]
+    resources = [replace(var.security_task_definition_arn, "/:\\d+$/", ":*")]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [var.cluster_arn]
+    }
+  }
+
+  statement {
+    sid       = "WaitForSecurityTask"
+    actions   = ["ecs:DescribeTasks", "ecs:StopTask"]
+    resources = ["*"]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [var.cluster_arn]
+    }
+  }
+
+  statement {
+    sid       = "PassSecurityTaskRoles"
+    actions   = ["iam:PassRole"]
+    resources = [var.security_task_role_arn, var.security_execution_role_arn]
+  }
+
+  statement {
+    sid = "ManageEventBridgeRuleForRunTaskSync"
+    actions = [
+      "events:PutTargets",
+      "events:PutRule",
+      "events:DescribeRule",
+    ]
+    resources = [
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForECSTaskRule",
+    ]
+  }
+
+  statement {
+    sid       = "WriteSecurityStateMachineLogs"
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.security.arn}:*"]
+  }
+
+  statement {
+    sid = "CreateLogDelivery"
+    actions = [
+      "logs:CreateLogDelivery",
+      "logs:GetLogDelivery",
+      "logs:UpdateLogDelivery",
+      "logs:DeleteLogDelivery",
+      "logs:ListLogDeliveries",
+      "logs:PutResourcePolicy",
+      "logs:DescribeResourcePolicies",
+      "logs:DescribeLogGroups",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "security" {
+  name   = "${local.security_state_machine_name}-policy"
+  role   = aws_iam_role.security.id
+  policy = data.aws_iam_policy_document.security.json
+}
+
+resource "aws_sfn_state_machine" "security" {
+  name     = local.security_state_machine_name
+  role_arn = aws_iam_role.security.arn
+
+  definition = templatefile("${path.module}/asl/security-issue-lifecycle.asl.json", {
+    cluster_arn                  = var.cluster_arn
+    security_task_definition_arn = var.security_task_definition_arn
+    subnets                      = var.subnets
+    security_group_id            = var.security_group_id
+  })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.security.arn}:*"
     include_execution_data = true
     level                  = "ALL"
   }

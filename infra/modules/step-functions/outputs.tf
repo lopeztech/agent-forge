@@ -57,3 +57,18 @@ output "functional_log_group_name" {
   value       = aws_cloudwatch_log_group.functional.name
   description = "CloudWatch log group for Functional state-machine execution events."
 }
+
+output "security_state_machine_arn" {
+  value       = aws_sfn_state_machine.security.arn
+  description = "Security state machine ARN. Target of the EventBridge rule on state:awaiting-security labels."
+}
+
+output "security_state_machine_name" {
+  value       = aws_sfn_state_machine.security.name
+  description = "Security state machine name."
+}
+
+output "security_log_group_name" {
+  value       = aws_cloudwatch_log_group.security.name
+  description = "CloudWatch log group for Security state-machine execution events."
+}

@@ -62,6 +62,12 @@ module "ecr_functional" {
   repository_name = "${var.name_prefix}/functional"
 }
 
+module "ecr_security" {
+  source = "../../modules/ecr"
+
+  repository_name = "${var.name_prefix}/security"
+}
+
 # ------------------------------------------------------------------------------
 # BA agent role (Slice A stub — no Bedrock yet)
 # ------------------------------------------------------------------------------
@@ -242,7 +248,43 @@ module "agent_functional" {
 }
 
 # ------------------------------------------------------------------------------
-# Step Functions: BA + Dev + Test + Functional issue-lifecycle state machines
+# Security agent role (Slice E.1 — Sonnet 4.6, read-only on PR branch, bash
+# for npm audit and ad-hoc inspection)
+# ------------------------------------------------------------------------------
+
+module "agent_security" {
+  source = "../../modules/agent-role"
+
+  name_prefix     = var.name_prefix
+  role            = "security"
+  env             = "dev"
+  image_uri       = "${module.ecr_security.repository_url}:latest"
+  app_secret_arn  = module.secrets.writer_secret_arn
+  app_secret_name = module.secrets.writer_secret_name
+  cluster_arn     = module.ecs_cluster.cluster_arn
+
+  subnets           = data.aws_subnets.default_public.ids
+  security_group_id = aws_security_group.agent_tasks.id
+
+  products_table_name = module.dynamodb.table_names["products"]
+
+  extra_environment = {
+    AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
+    AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+  }
+
+  dynamodb_table_arns = {
+    products      = module.dynamodb.table_arns["products"]
+    issue_state   = module.dynamodb.table_arns["issue_state"]
+    team_memory   = module.dynamodb.table_arns["team_memory"]
+    budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+  }
+
+  bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
+}
+
+# ------------------------------------------------------------------------------
+# Step Functions: BA + Dev + Test + Functional + Security state machines
 # ------------------------------------------------------------------------------
 
 module "step_functions" {
@@ -261,6 +303,9 @@ module "step_functions" {
   functional_task_definition_arn = module.agent_functional.task_definition_arn
   functional_task_role_arn       = module.agent_functional.task_role_arn
   functional_execution_role_arn  = module.agent_functional.execution_role_arn
+  security_task_definition_arn   = module.agent_security.task_definition_arn
+  security_task_role_arn         = module.agent_security.task_role_arn
+  security_execution_role_arn    = module.agent_security.execution_role_arn
   cluster_arn                    = module.ecs_cluster.cluster_arn
   subnets                        = data.aws_subnets.default_public.ids
   security_group_id              = aws_security_group.agent_tasks.id
@@ -328,6 +373,12 @@ data "aws_iam_policy_document" "eb_to_sfn" {
     sid       = "StartFunctionalExecutions"
     actions   = ["states:StartExecution"]
     resources = [module.step_functions.functional_state_machine_arn]
+  }
+
+  statement {
+    sid       = "StartSecurityExecutions"
+    actions   = ["states:StartExecution"]
+    resources = [module.step_functions.security_state_machine_arn]
   }
 }
 
@@ -437,5 +488,36 @@ resource "aws_cloudwatch_event_target" "state_awaiting_functional_to_functional"
   event_bus_name = module.eventbridge.bus_name
   target_id      = "functional-state-machine"
   arn            = module.step_functions.functional_state_machine_arn
+  role_arn       = aws_iam_role.eb_to_sfn.arn
+}
+
+# ------------------------------------------------------------------------------
+# EventBridge rule: state:awaiting-security → Security state machine.
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_event_rule" "state_awaiting_security_to_security" {
+  name           = "${var.name_prefix}-state-awaiting-security-to-security"
+  description    = "Issues labeled state:awaiting-security → Security state machine."
+  event_bus_name = module.eventbridge.bus_name
+
+  event_pattern = jsonencode({
+    source      = ["agent-forge.webhook"]
+    detail-type = ["issues"]
+    detail = {
+      action = ["labeled"]
+      payload = {
+        label = {
+          name = ["state:awaiting-security"]
+        }
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "state_awaiting_security_to_security" {
+  rule           = aws_cloudwatch_event_rule.state_awaiting_security_to_security.name
+  event_bus_name = module.eventbridge.bus_name
+  target_id      = "security-state-machine"
+  arn            = module.step_functions.security_state_machine_arn
   role_arn       = aws_iam_role.eb_to_sfn.arn
 }

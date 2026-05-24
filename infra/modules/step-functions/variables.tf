@@ -63,6 +63,21 @@ variable "functional_execution_role_arn" {
   description = "Functional execution role ARN. Step Function execution role needs iam:PassRole for it."
 }
 
+variable "security_task_definition_arn" {
+  type        = string
+  description = "Security task definition ARN (versioned)."
+}
+
+variable "security_task_role_arn" {
+  type        = string
+  description = "Security task role ARN. Step Function execution role needs iam:PassRole for it."
+}
+
+variable "security_execution_role_arn" {
+  type        = string
+  description = "Security execution role ARN. Step Function execution role needs iam:PassRole for it."
+}
+
 variable "cluster_arn" {
   type        = string
   description = "ECS cluster ARN where tasks are launched."
