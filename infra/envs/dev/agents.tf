@@ -68,6 +68,12 @@ module "ecr_security" {
   repository_name = "${var.name_prefix}/security"
 }
 
+module "ecr_po" {
+  source = "../../modules/ecr"
+
+  repository_name = "${var.name_prefix}/po"
+}
+
 # ------------------------------------------------------------------------------
 # BA agent role (Slice A stub — no Bedrock yet)
 # ------------------------------------------------------------------------------
@@ -284,7 +290,45 @@ module "agent_security" {
 }
 
 # ------------------------------------------------------------------------------
-# Step Functions: BA + Dev + Test + Functional + Security state machines
+# PO agent role (Slice F.1 — Opus 4.6 review-only; doesn't merge, just
+# posts a recommend-merge / kickback comment + parks at human-needed)
+# ------------------------------------------------------------------------------
+
+module "agent_po" {
+  source = "../../modules/agent-role"
+
+  name_prefix     = var.name_prefix
+  role            = "po"
+  env             = "dev"
+  image_uri       = "${module.ecr_po.repository_url}:latest"
+  app_secret_arn  = module.secrets.writer_secret_arn
+  app_secret_name = module.secrets.writer_secret_name
+  cluster_arn     = module.ecs_cluster.cluster_arn
+
+  subnets           = data.aws_subnets.default_public.ids
+  security_group_id = aws_security_group.agent_tasks.id
+
+  products_table_name = module.dynamodb.table_names["products"]
+
+  extra_environment = {
+    AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
+    AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+  }
+
+  dynamodb_table_arns = {
+    products      = module.dynamodb.table_arns["products"]
+    issue_state   = module.dynamodb.table_arns["issue_state"]
+    team_memory   = module.dynamodb.table_arns["team_memory"]
+    budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+  }
+
+  # PO runs on Opus 4.6 (best-available Opus; 4.7 gated behind AWS Sales
+  # on this account).
+  bedrock_model_arns = local.bedrock_invoke_arns["opus-4-6"]
+}
+
+# ------------------------------------------------------------------------------
+# Step Functions: BA + Dev + Test + Functional + Security + PO state machines
 # ------------------------------------------------------------------------------
 
 module "step_functions" {
@@ -306,6 +350,9 @@ module "step_functions" {
   security_task_definition_arn   = module.agent_security.task_definition_arn
   security_task_role_arn         = module.agent_security.task_role_arn
   security_execution_role_arn    = module.agent_security.execution_role_arn
+  po_task_definition_arn         = module.agent_po.task_definition_arn
+  po_task_role_arn               = module.agent_po.task_role_arn
+  po_execution_role_arn          = module.agent_po.execution_role_arn
   cluster_arn                    = module.ecs_cluster.cluster_arn
   subnets                        = data.aws_subnets.default_public.ids
   security_group_id              = aws_security_group.agent_tasks.id
@@ -379,6 +426,12 @@ data "aws_iam_policy_document" "eb_to_sfn" {
     sid       = "StartSecurityExecutions"
     actions   = ["states:StartExecution"]
     resources = [module.step_functions.security_state_machine_arn]
+  }
+
+  statement {
+    sid       = "StartPoExecutions"
+    actions   = ["states:StartExecution"]
+    resources = [module.step_functions.po_state_machine_arn]
   }
 }
 
@@ -519,5 +572,36 @@ resource "aws_cloudwatch_event_target" "state_awaiting_security_to_security" {
   event_bus_name = module.eventbridge.bus_name
   target_id      = "security-state-machine"
   arn            = module.step_functions.security_state_machine_arn
+  role_arn       = aws_iam_role.eb_to_sfn.arn
+}
+
+# ------------------------------------------------------------------------------
+# EventBridge rule: state:awaiting-po → PO state machine.
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_event_rule" "state_awaiting_po_to_po" {
+  name           = "${var.name_prefix}-state-awaiting-po-to-po"
+  description    = "Issues labeled state:awaiting-po → PO state machine."
+  event_bus_name = module.eventbridge.bus_name
+
+  event_pattern = jsonencode({
+    source      = ["agent-forge.webhook"]
+    detail-type = ["issues"]
+    detail = {
+      action = ["labeled"]
+      payload = {
+        label = {
+          name = ["state:awaiting-po"]
+        }
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "state_awaiting_po_to_po" {
+  rule           = aws_cloudwatch_event_rule.state_awaiting_po_to_po.name
+  event_bus_name = module.eventbridge.bus_name
+  target_id      = "po-state-machine"
+  arn            = module.step_functions.po_state_machine_arn
   role_arn       = aws_iam_role.eb_to_sfn.arn
 }
