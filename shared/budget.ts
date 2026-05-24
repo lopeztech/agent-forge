@@ -9,7 +9,11 @@
 // BETWEEN range without an extra GSI.
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, PutCommand } from "@aws-sdk/lib-dynamodb";
+import {
+  DynamoDBDocumentClient,
+  PutCommand,
+  QueryCommand,
+} from "@aws-sdk/lib-dynamodb";
 
 const REGION = process.env.AWS_REGION ?? "eu-west-1";
 let _ddb: DynamoDBDocumentClient | undefined;
@@ -52,4 +56,46 @@ export async function recordSpend(opts: RecordSpendOpts): Promise<void> {
       },
     }),
   );
+}
+
+export type GetIssueSpendOpts = {
+  tableName: string;
+  productId: string;
+  issueNumber: number | string;
+};
+
+// Sums cost_usd across all budget_ledger rows for a single (product, issue).
+//
+// The table's PK is product_id, SK is `<iso_ts>#<run_id>`. There's no GSI on
+// issue_number, so this is a partition Query with a FilterExpression. For
+// products with thousands of historical rows this becomes a noticeable read;
+// the long-term fix is a GSI on (product_id, issue_number). For Dev's pre-
+// attempt budget-cap check this fires once per attempt, so the cost is
+// acceptable today.
+export async function getIssueSpendUsd(
+  opts: GetIssueSpendOpts,
+): Promise<number> {
+  const issueNumberValue = Number(opts.issueNumber);
+  let total = 0;
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb().send(
+      new QueryCommand({
+        TableName: opts.tableName,
+        KeyConditionExpression: "product_id = :p",
+        FilterExpression: "issue_number = :i",
+        ExpressionAttributeValues: {
+          ":p": opts.productId,
+          ":i": issueNumberValue,
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const item of r.Items ?? []) {
+      const cost = item["cost_usd"];
+      if (typeof cost === "number") total += cost;
+    }
+    exclusiveStartKey = r.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+  return total;
 }

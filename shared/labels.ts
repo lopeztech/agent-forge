@@ -37,6 +37,34 @@ export function iterLabel(attempt: 1 | 2 | 3): `iter:${1 | 2 | 3}` {
   return `iter:${attempt}`;
 }
 
+export type IterAttempt = 1 | 2 | 3;
+
+// Read the current iter:N label off an issue. Returns the highest matching
+// attempt number if any iter:* labels are present, or undefined if none. Dev
+// uses the result to pick its tier and to know whether iter:1 needs to be
+// applied at the start of an attempt.
+export function parseIterLabel(
+  labels: ReadonlyArray<{ name: string }>,
+): IterAttempt | undefined {
+  let max: IterAttempt | undefined;
+  for (const { name } of labels) {
+    if (name === "iter:1") max = max === undefined ? 1 : (Math.max(max, 1) as IterAttempt);
+    else if (name === "iter:2") max = max === undefined ? 2 : (Math.max(max, 2) as IterAttempt);
+    else if (name === "iter:3") max = max === undefined ? 3 : (Math.max(max, 3) as IterAttempt);
+  }
+  return max;
+}
+
+// True iff the human-applied `complexity:high` flag is on the issue. This
+// label overrides BA's complexity tag at the Dev tier-selection step — see
+// CLAUDE.md → Roles → Developer for the policy ("Opus on the final attempt
+// of the cap, or for issues labelled complexity:high").
+export function hasComplexityHighLabel(
+  labels: ReadonlyArray<{ name: string }>,
+): boolean {
+  return labels.some((l) => l.name === FLAG_LABELS.complexityHigh);
+}
+
 export const AREA_LABEL_PREFIX = "area:";
 export const AREA_ALL_LABEL = "area:*";
 

@@ -34,7 +34,7 @@
 //   - Kickback handling for failed PRs (B.4)
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
-import { recordSpend } from "../../../shared/budget.ts";
+import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -50,7 +50,11 @@ import {
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
+  hasComplexityHighLabel,
+  iterLabel,
   parseAreaLabels,
+  parseIterLabel,
+  type IterAttempt,
 } from "../../../shared/labels.ts";
 import { acquireAreaLocks } from "../../../shared/locks/area-locks.ts";
 import {
@@ -97,6 +101,10 @@ const USER_AGENT = `agent-forge-${ROLE}`;
 // B.1 holds the lock for a single Sonnet call (seconds); when B.3 lands and
 // runs tests, this ceiling becomes the wall-clock cap for the whole attempt.
 const LOCK_TTL_SECONDS = 2 * 60 * 60;
+
+// Per-issue budget cap from CLAUDE.md → Cost model ("$12 per-issue cap").
+// Overridable per product via products.per_issue_budget_cap_usd.
+const DEFAULT_PER_ISSUE_BUDGET_CAP_USD = 12;
 
 // Agent loop bounds. B.2 added read tools, so the agent typically spends 5-15
 // turns investigating before calling propose_plan. 30 turns is the hard cap
@@ -459,6 +467,48 @@ function buildPrBody(agentBody: string, issueNumber: number): string {
   return `${header}${agentBody}${footer}`;
 }
 
+// Comment posted when sum(spent) on the issue has already crossed the
+// per-issue cap before this attempt could even start the model call.
+function commentBudgetCapTripped(args: {
+  runId: string;
+  spentSoFar: number;
+  capUsd: number;
+  attempt: IterAttempt;
+}): string {
+  return [
+    `## Dev did not run (run \`${args.runId}\`)`,
+    "",
+    `Per-issue budget cap tripped before attempt ${args.attempt}: spent so far ` +
+      `**$${args.spentSoFar.toFixed(4)}**, cap is **$${args.capUsd.toFixed(2)}**.`,
+    "",
+    `Parking at \`${HUMAN_NEEDED_LABEL}\`. To resume, either raise ` +
+      "`products.per_issue_budget_cap_usd` for this product, or close the " +
+      "issue as too expensive.",
+  ].join("\n");
+}
+
+// Comment posted when the agent loop hits max_turns without calling
+// submit_done (distinct from "agent called submit_done but it failed").
+function commentLoopRunaway(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  costUsd: number;
+  attempt: IterAttempt;
+}): string {
+  return [
+    `## Dev ran out of turns (run \`${args.runId}\`, ${args.modelId}, attempt ${args.attempt})`,
+    "",
+    `The Sonnet/Haiku/Opus loop hit the ${args.turns}-turn ceiling without ` +
+      "calling `submit_done`. This usually means the model couldn't converge " +
+      "(stuck in a debugging cycle, repeating reads, etc.).",
+    "",
+    `Spend on this attempt: **$${args.costUsd.toFixed(4)}**.`,
+    "",
+    `Parking at \`${HUMAN_NEEDED_LABEL}\`.`,
+  ].join("\n");
+}
+
 function commentPRShipped(args: {
   runId: string;
   modelId: string;
@@ -735,17 +785,75 @@ async function main(): Promise<void> {
       command: testCommand ?? "(none — finalize will skip tests)",
     });
 
-    // Tier driven by BA's complexity tag. B.4 will wire `attempt` to the
-    // iter:N label so kickbacks escalate; for now first-attempt only.
+    // Attempt counter: read iter:N off the issue. Missing → first attempt,
+    // we apply iter:1 below. Future kickback handlers (Test/Functional/etc.)
+    // are responsible for incrementing iter:N before re-triggering Dev.
+    const issueLabels = issue.labels ?? [];
+    const existingAttempt = parseIterLabel(issueLabels);
+    const attempt: IterAttempt = existingAttempt ?? 1;
+    log({ msg: "resolved attempt", attempt, existing_iter_label: existingAttempt });
+
+    // Per-issue budget cap pre-check. If the sum of every prior model call
+    // on this issue already exceeds the cap, don't spend another dollar —
+    // park immediately. This catches stuck loops across attempts.
+    const budgetCapUsd =
+      product.per_issue_budget_cap_usd ?? DEFAULT_PER_ISSUE_BUDGET_CAP_USD;
+    const spentSoFar = await getIssueSpendUsd({
+      tableName: BUDGET_LEDGER_TABLE,
+      productId: PRODUCT_ID,
+      issueNumber: ISSUE_NUMBER,
+    });
+    log({
+      msg: "budget pre-check",
+      spent_so_far_usd: spentSoFar,
+      cap_usd: budgetCapUsd,
+    });
+    if (spentSoFar >= budgetCapUsd) {
+      await postComment(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        commentBudgetCapTripped({
+          runId,
+          spentSoFar,
+          capUsd: budgetCapUsd,
+          attempt,
+        }),
+      );
+      await transitionLabel(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        STATE_LABELS.ready,
+        HUMAN_NEEDED_LABEL,
+      );
+      log({ msg: "budget cap tripped; parked", spent_so_far_usd: spentSoFar });
+      return;
+    }
+
+    // Apply iter:1 if no iter:* label yet. (Don't re-apply on attempts 2/3 —
+    // those labels were set by the kicker.)
+    if (existingAttempt === undefined) {
+      await addLabels(ghOpts, REPO, ISSUE_NUMBER, [iterLabel(attempt)]);
+      log({ msg: "applied iter label", label: iterLabel(attempt) });
+    }
+
+    // Tier driven by BA's complexity tag, with two overrides:
+    //   - complexity:high label (human override) → treat as "large"
+    //   - attempt >= 2 floors at Sonnet; attempt 3 always Opus (in tierForDev)
+    const complexityHigh = hasComplexityHighLabel(issueLabels);
+    const effectiveComplexity = complexityHigh ? "large" : baExpansion.complexity;
     const tier: ModelTier = tierForDev({
-      complexity: baExpansion.complexity,
-      attempt: 1,
+      complexity: effectiveComplexity,
+      attempt,
     });
     log({
       msg: "selected model tier",
       tier,
       complexity: baExpansion.complexity ?? "(unset)",
-      attempt: 1,
+      complexity_high_override: complexityHigh,
+      effective_complexity: effectiveComplexity ?? "(unset)",
+      attempt,
     });
     const model = getModelByTier(tier);
     const userMessage = buildUserMessage({
@@ -850,6 +958,28 @@ async function main(): Promise<void> {
         ISSUE_NUMBER,
         STATE_LABELS.ready,
         STATE_LABELS.awaitingTests,
+      );
+    } else if (loop.stopReason === "max_turns" && finalizeResult === undefined) {
+      // Runaway loop: agent never reached submit_done. Distinct comment so
+      // humans can tell this apart from "submit_done failed validation".
+      await postComment(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        commentLoopRunaway({
+          runId,
+          modelId: model.bedrockModelId,
+          turns: loop.turns,
+          costUsd: loop.costUsd,
+          attempt,
+        }),
+      );
+      await transitionLabel(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        STATE_LABELS.ready,
+        HUMAN_NEEDED_LABEL,
       );
     } else {
       await postComment(
