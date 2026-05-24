@@ -45,6 +45,11 @@ export type ProductConfig = {
   // agent is told no tests are configured and may submit without running any).
   // Slice B.1 declares the field; B.3 wires it through to the agent loop.
   test_command?: string;
+  // Per-issue hard spend cap in USD across all attempts (Dev role). Sum of
+  // budget_ledger.cost_usd for this issue beyond this value parks the issue
+  // at human-needed before the next model call. Default 12 USD per CLAUDE.md
+  // → Cost model.
+  per_issue_budget_cap_usd?: number;
   updated_at?: string;
 };
 
