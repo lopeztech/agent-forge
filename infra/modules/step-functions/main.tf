@@ -1,7 +1,8 @@
 locals {
-  ba_state_machine_name   = "${var.name_prefix}-ba-issue-lifecycle"
-  dev_state_machine_name  = "${var.name_prefix}-dev-issue-lifecycle"
-  test_state_machine_name = "${var.name_prefix}-test-issue-lifecycle"
+  ba_state_machine_name         = "${var.name_prefix}-ba-issue-lifecycle"
+  dev_state_machine_name        = "${var.name_prefix}-dev-issue-lifecycle"
+  test_state_machine_name       = "${var.name_prefix}-test-issue-lifecycle"
+  functional_state_machine_name = "${var.name_prefix}-functional-issue-lifecycle"
 }
 
 # ------------------------------------------------------------------------------
@@ -328,6 +329,107 @@ resource "aws_sfn_state_machine" "test" {
 
   logging_configuration {
     log_destination        = "${aws_cloudwatch_log_group.test.arn}:*"
+    include_execution_data = true
+    level                  = "ALL"
+  }
+}
+
+# ------------------------------------------------------------------------------
+# Functional state machine
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "functional" {
+  name              = "/aws/states/${local.functional_state_machine_name}"
+  retention_in_days = var.log_retention_days
+}
+
+resource "aws_iam_role" "functional" {
+  name               = "${local.functional_state_machine_name}-role"
+  assume_role_policy = data.aws_iam_policy_document.assume.json
+}
+
+data "aws_iam_policy_document" "functional" {
+  statement {
+    sid       = "RunFunctionalTask"
+    actions   = ["ecs:RunTask"]
+    resources = [replace(var.functional_task_definition_arn, "/:\\d+$/", ":*")]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [var.cluster_arn]
+    }
+  }
+
+  statement {
+    sid       = "WaitForFunctionalTask"
+    actions   = ["ecs:DescribeTasks", "ecs:StopTask"]
+    resources = ["*"]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [var.cluster_arn]
+    }
+  }
+
+  statement {
+    sid       = "PassFunctionalTaskRoles"
+    actions   = ["iam:PassRole"]
+    resources = [var.functional_task_role_arn, var.functional_execution_role_arn]
+  }
+
+  statement {
+    sid = "ManageEventBridgeRuleForRunTaskSync"
+    actions = [
+      "events:PutTargets",
+      "events:PutRule",
+      "events:DescribeRule",
+    ]
+    resources = [
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForECSTaskRule",
+    ]
+  }
+
+  statement {
+    sid       = "WriteFunctionalStateMachineLogs"
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.functional.arn}:*"]
+  }
+
+  statement {
+    sid = "CreateLogDelivery"
+    actions = [
+      "logs:CreateLogDelivery",
+      "logs:GetLogDelivery",
+      "logs:UpdateLogDelivery",
+      "logs:DeleteLogDelivery",
+      "logs:ListLogDeliveries",
+      "logs:PutResourcePolicy",
+      "logs:DescribeResourcePolicies",
+      "logs:DescribeLogGroups",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "functional" {
+  name   = "${local.functional_state_machine_name}-policy"
+  role   = aws_iam_role.functional.id
+  policy = data.aws_iam_policy_document.functional.json
+}
+
+resource "aws_sfn_state_machine" "functional" {
+  name     = local.functional_state_machine_name
+  role_arn = aws_iam_role.functional.arn
+
+  definition = templatefile("${path.module}/asl/functional-issue-lifecycle.asl.json", {
+    cluster_arn                    = var.cluster_arn
+    functional_task_definition_arn = var.functional_task_definition_arn
+    subnets                        = var.subnets
+    security_group_id              = var.security_group_id
+  })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.functional.arn}:*"
     include_execution_data = true
     level                  = "ALL"
   }
