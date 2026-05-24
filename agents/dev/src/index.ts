@@ -74,8 +74,14 @@ import {
 } from "../../../shared/state/products.ts";
 import { finalize, setupWorkdir, type FinalizeResult } from "./finalize.ts";
 import { normalizeSubmission, type Submission } from "./plan.ts";
-import { buildReadToolDefinitions, dispatchReadTool } from "./tools.ts";
-import { buildWriteToolDefinitions, dispatchWriteTool } from "./write-tools.ts";
+import {
+  buildReadToolDefinitions,
+  dispatchReadTool,
+} from "../../../shared/agent/read-tools.ts";
+import {
+  buildWriteToolDefinitions,
+  dispatchWriteTool,
+} from "../../../shared/agent/write-tools.ts";
 import { cloneTargetRepo, type ClonedWorkdir } from "./workdir.ts";
 
 // ---------------------------------------------------------------------------

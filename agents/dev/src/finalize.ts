@@ -5,7 +5,7 @@
 // the failure paths (no changes / push failed / PR creation failed) are
 // auditable in one place.
 
-import { runBashRaw, type BashRunResult } from "./write-tools.ts";
+import { runBashRaw, type BashRunResult } from "../../../shared/agent/write-tools.ts";
 
 const API = "https://api.github.com";
 

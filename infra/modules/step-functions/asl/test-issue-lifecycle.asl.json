@@ -1,0 +1,56 @@
+{
+  "Comment": "Test role: triggered when an issue gets `state:awaiting-tests` (Dev transitions here after opening the PR). Runs the Test Fargate task with issue metadata. The agent clones Dev's PR branch, adds tests, and transitions the label.",
+  "StartAt": "RunTest",
+  "States": {
+    "RunTest": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.sync",
+      "Parameters": {
+        "Cluster": "${cluster_arn}",
+        "TaskDefinition": "${test_task_definition_arn}",
+        "LaunchType": "FARGATE",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": ${jsonencode(subnets)},
+            "SecurityGroups": ["${security_group_id}"],
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "test",
+              "Environment": [
+                { "Name": "AGENT_FORGE_PRODUCT_ID", "Value.$": "$.detail.product_id" },
+                { "Name": "AGENT_FORGE_ISSUE_NUMBER", "Value.$": "States.JsonToString($.detail.payload.issue.number)" },
+                { "Name": "AGENT_FORGE_REPO", "Value.$": "$.detail.payload.repository.full_name" },
+                { "Name": "AGENT_FORGE_DELIVERY_ID", "Value.$": "$.detail.delivery_id" },
+                { "Name": "AGENT_FORGE_LABEL", "Value.$": "$.detail.payload.label.name" }
+              ]
+            }
+          ]
+        }
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed"],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 1,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "TaskFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "End": true
+    },
+    "TaskFailed": {
+      "Type": "Fail",
+      "Cause": "Test Fargate task failed; see log group for the task's container output."
+    }
+  }
+}

@@ -1,14 +1,15 @@
-// Write tools for the Dev agent loop. Path safety mirrors the read tools:
-// everything resolves against the cloned workdir; escapes are rejected.
-// bash runs through /bin/bash -c with cwd inside the workdir. Q2 resolution
-// is "unrestricted inside /tmp/<run>" — the Fargate task is ephemeral and
-// IAM-scoped, so the blast radius is one stuck task.
+// Write tools shared by every agent role that mutates a cloned workdir.
+// Path safety mirrors the read tools: everything resolves against the
+// workdir; escapes are rejected. bash runs through /bin/bash -c with cwd
+// inside the workdir. Q2 resolution is "unrestricted inside /tmp/<run>" —
+// the Fargate task is ephemeral and IAM-scoped, so the blast radius is one
+// stuck task.
 
 import { execFile } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve, relative, sep } from "node:path";
 
-import type { ToolDefinition } from "../../../shared/models.ts";
+import type { ToolDefinition } from "../models.ts";
 
 const MAX_WRITE_FILE_BYTES = 1024 * 1024; // 1 MB
 const BASH_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000; // 5 min

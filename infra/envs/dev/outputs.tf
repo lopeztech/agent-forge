@@ -74,3 +74,18 @@ output "dev_image_repository_url" {
   value       = module.ecr_dev.repository_url
   description = "ECR repository the Dev image is pushed to. The agent-images workflow tags :latest + :sha-<commit>."
 }
+
+output "test_state_machine_arn" {
+  value       = module.step_functions.test_state_machine_arn
+  description = "Test state machine ARN."
+}
+
+output "test_task_log_group" {
+  value       = module.agent_test.log_group_name
+  description = "CloudWatch log group for the Test Fargate task's container output."
+}
+
+output "test_image_repository_url" {
+  value       = module.ecr_test.repository_url
+  description = "ECR repository the Test image is pushed to."
+}

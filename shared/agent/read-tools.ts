@@ -1,13 +1,12 @@
-// Read tools for the Dev agent loop. All paths are resolved against the
-// cloned workdir; anything that escapes (../../etc/passwd etc.) is rejected.
-// Implementations stay in pure TS so the runtime container doesn't need to
-// shell out for read-only work — that boundary stays at B.3 where the
-// `bash` tool lands.
+// Read tools shared by every agent role that operates on a cloned target
+// repo workdir. All paths are resolved against the workdir; anything that
+// escapes (../../etc/passwd etc.) is rejected. Pure TS, no shell-out — the
+// `bash` tool covers anything that needs a process.
 
 import { readdir, readFile, stat } from "node:fs/promises";
 import { resolve, relative, sep } from "node:path";
 
-import type { ToolDefinition } from "../../../shared/models.ts";
+import type { ToolDefinition } from "../models.ts";
 
 const MAX_FILE_BYTES = 100 * 1024;
 const MAX_LIST_ENTRIES = 200;
