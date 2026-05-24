@@ -50,6 +50,12 @@ module "ecr_dev" {
   repository_name = "${var.name_prefix}/dev"
 }
 
+module "ecr_test" {
+  source = "../../modules/ecr"
+
+  repository_name = "${var.name_prefix}/test"
+}
+
 # ------------------------------------------------------------------------------
 # BA agent role (Slice A stub — no Bedrock yet)
 # ------------------------------------------------------------------------------
@@ -156,22 +162,63 @@ resource "aws_iam_role_policy" "agent_dev_area_lock_release" {
 }
 
 # ------------------------------------------------------------------------------
-# Step Functions: BA + Dev issue-lifecycle state machines
+# Test agent role (Slice C — Sonnet 4.6, no area locks per CLAUDE.md
+# concurrency model)
+# ------------------------------------------------------------------------------
+
+module "agent_test" {
+  source = "../../modules/agent-role"
+
+  name_prefix     = var.name_prefix
+  role            = "test"
+  env             = "dev"
+  image_uri       = "${module.ecr_test.repository_url}:latest"
+  app_secret_arn  = module.secrets.writer_secret_arn
+  app_secret_name = module.secrets.writer_secret_name
+  cluster_arn     = module.ecs_cluster.cluster_arn
+
+  subnets           = data.aws_subnets.default_public.ids
+  security_group_id = aws_security_group.agent_tasks.id
+
+  products_table_name = module.dynamodb.table_names["products"]
+
+  extra_environment = {
+    AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
+    AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+  }
+
+  # Test reads products + issue_state (BA expansion + budget pre-check),
+  # writes budget_ledger. No area_locks (doesn't lock per architecture).
+  dynamodb_table_arns = {
+    products      = module.dynamodb.table_arns["products"]
+    issue_state   = module.dynamodb.table_arns["issue_state"]
+    team_memory   = module.dynamodb.table_arns["team_memory"]
+    budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+  }
+
+  bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
+}
+
+# ------------------------------------------------------------------------------
+# Step Functions: BA + Dev + Test issue-lifecycle state machines
 # ------------------------------------------------------------------------------
 
 module "step_functions" {
   source = "../../modules/step-functions"
 
-  name_prefix             = var.name_prefix
-  ba_task_definition_arn  = module.agent_ba.task_definition_arn
-  ba_task_role_arn        = module.agent_ba.task_role_arn
-  ba_execution_role_arn   = module.agent_ba.execution_role_arn
-  dev_task_definition_arn = module.agent_dev.task_definition_arn
-  dev_task_role_arn       = module.agent_dev.task_role_arn
-  dev_execution_role_arn  = module.agent_dev.execution_role_arn
-  cluster_arn             = module.ecs_cluster.cluster_arn
-  subnets                 = data.aws_subnets.default_public.ids
-  security_group_id       = aws_security_group.agent_tasks.id
+  name_prefix              = var.name_prefix
+  ba_task_definition_arn   = module.agent_ba.task_definition_arn
+  ba_task_role_arn         = module.agent_ba.task_role_arn
+  ba_execution_role_arn    = module.agent_ba.execution_role_arn
+  dev_task_definition_arn  = module.agent_dev.task_definition_arn
+  dev_task_role_arn        = module.agent_dev.task_role_arn
+  dev_execution_role_arn   = module.agent_dev.execution_role_arn
+  test_task_definition_arn = module.agent_test.task_definition_arn
+  test_task_role_arn       = module.agent_test.task_role_arn
+  test_execution_role_arn  = module.agent_test.execution_role_arn
+  cluster_arn              = module.ecs_cluster.cluster_arn
+  subnets                  = data.aws_subnets.default_public.ids
+  security_group_id        = aws_security_group.agent_tasks.id
 }
 
 # ------------------------------------------------------------------------------
@@ -225,6 +272,12 @@ data "aws_iam_policy_document" "eb_to_sfn" {
     actions   = ["states:StartExecution"]
     resources = [module.step_functions.dev_state_machine_arn]
   }
+
+  statement {
+    sid       = "StartTestExecutions"
+    actions   = ["states:StartExecution"]
+    resources = [module.step_functions.test_state_machine_arn]
+  }
 }
 
 resource "aws_iam_role_policy" "eb_to_sfn" {
@@ -270,5 +323,37 @@ resource "aws_cloudwatch_event_target" "state_ready_to_dev" {
   event_bus_name = module.eventbridge.bus_name
   target_id      = "dev-state-machine"
   arn            = module.step_functions.dev_state_machine_arn
+  role_arn       = aws_iam_role.eb_to_sfn.arn
+}
+
+# ------------------------------------------------------------------------------
+# EventBridge rule: webhook event "issues.labeled" + label.name =
+# "state:awaiting-tests" → Test state machine.
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_event_rule" "state_awaiting_tests_to_test" {
+  name           = "${var.name_prefix}-state-awaiting-tests-to-test"
+  description    = "Issues labeled state:awaiting-tests → Test state machine."
+  event_bus_name = module.eventbridge.bus_name
+
+  event_pattern = jsonencode({
+    source      = ["agent-forge.webhook"]
+    detail-type = ["issues"]
+    detail = {
+      action = ["labeled"]
+      payload = {
+        label = {
+          name = ["state:awaiting-tests"]
+        }
+      }
+    }
+  })
+}
+
+resource "aws_cloudwatch_event_target" "state_awaiting_tests_to_test" {
+  rule           = aws_cloudwatch_event_rule.state_awaiting_tests_to_test.name
+  event_bus_name = module.eventbridge.bus_name
+  target_id      = "test-state-machine"
+  arn            = module.step_functions.test_state_machine_arn
   role_arn       = aws_iam_role.eb_to_sfn.arn
 }

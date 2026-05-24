@@ -6,6 +6,7 @@ on:
     paths:
       - "agents/ba/**"
       - "agents/dev/**"
+      - "agents/test/**"
       - "shared/**"
       - "package.json"
       - "package-lock.json"
@@ -18,7 +19,7 @@ on:
         required: true
         default: ba
         type: choice
-        options: [ba, dev]
+        options: [ba, dev, test]
 
 permissions:
   id-token: write
@@ -35,7 +36,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        role: [ba, dev]
+        role: [ba, dev, test]
 
     steps:
       - uses: actions/checkout@v4

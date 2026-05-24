@@ -11,7 +11,7 @@ import {
   buildWriteToolDefinitions,
   dispatchWriteTool,
   runBashRaw,
-} from "../agents/dev/src/write-tools.ts";
+} from "../shared/agent/write-tools.ts";
 
 let WORKDIR: string;
 

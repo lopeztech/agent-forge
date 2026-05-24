@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import {
   dispatchReadTool,
   buildReadToolDefinitions,
-} from "../agents/dev/src/tools.ts";
+} from "../shared/agent/read-tools.ts";
 
 let WORKDIR: string;
 

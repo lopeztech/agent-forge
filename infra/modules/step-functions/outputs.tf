@@ -27,3 +27,18 @@ output "dev_log_group_name" {
   value       = aws_cloudwatch_log_group.dev.name
   description = "CloudWatch log group for Dev state-machine execution events."
 }
+
+output "test_state_machine_arn" {
+  value       = aws_sfn_state_machine.test.arn
+  description = "Test state machine ARN. Target of the EventBridge rule on state:awaiting-tests labels."
+}
+
+output "test_state_machine_name" {
+  value       = aws_sfn_state_machine.test.name
+  description = "Test state machine name."
+}
+
+output "test_log_group_name" {
+  value       = aws_cloudwatch_log_group.test.name
+  description = "CloudWatch log group for Test state-machine execution events."
+}
