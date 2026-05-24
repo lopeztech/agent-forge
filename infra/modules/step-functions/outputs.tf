@@ -72,3 +72,18 @@ output "security_log_group_name" {
   value       = aws_cloudwatch_log_group.security.name
   description = "CloudWatch log group for Security state-machine execution events."
 }
+
+output "po_state_machine_arn" {
+  value       = aws_sfn_state_machine.po.arn
+  description = "PO state machine ARN. Target of the EventBridge rule on state:awaiting-po labels."
+}
+
+output "po_state_machine_name" {
+  value       = aws_sfn_state_machine.po.name
+  description = "PO state machine name."
+}
+
+output "po_log_group_name" {
+  value       = aws_cloudwatch_log_group.po.name
+  description = "CloudWatch log group for PO state-machine execution events."
+}

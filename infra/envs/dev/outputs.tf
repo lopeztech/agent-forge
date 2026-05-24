@@ -119,3 +119,18 @@ output "security_image_repository_url" {
   value       = module.ecr_security.repository_url
   description = "ECR repository the Security image is pushed to."
 }
+
+output "po_state_machine_arn" {
+  value       = module.step_functions.po_state_machine_arn
+  description = "PO state machine ARN."
+}
+
+output "po_task_log_group" {
+  value       = module.agent_po.log_group_name
+  description = "CloudWatch log group for the PO Fargate task's container output."
+}
+
+output "po_image_repository_url" {
+  value       = module.ecr_po.repository_url
+  description = "ECR repository the PO image is pushed to."
+}

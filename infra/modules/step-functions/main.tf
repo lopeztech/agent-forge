@@ -4,6 +4,7 @@ locals {
   test_state_machine_name       = "${var.name_prefix}-test-issue-lifecycle"
   functional_state_machine_name = "${var.name_prefix}-functional-issue-lifecycle"
   security_state_machine_name   = "${var.name_prefix}-security-issue-lifecycle"
+  po_state_machine_name         = "${var.name_prefix}-po-issue-lifecycle"
 }
 
 # ------------------------------------------------------------------------------
@@ -532,6 +533,107 @@ resource "aws_sfn_state_machine" "security" {
 
   logging_configuration {
     log_destination        = "${aws_cloudwatch_log_group.security.arn}:*"
+    include_execution_data = true
+    level                  = "ALL"
+  }
+}
+
+# ------------------------------------------------------------------------------
+# PO state machine
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "po" {
+  name              = "/aws/states/${local.po_state_machine_name}"
+  retention_in_days = var.log_retention_days
+}
+
+resource "aws_iam_role" "po" {
+  name               = "${local.po_state_machine_name}-role"
+  assume_role_policy = data.aws_iam_policy_document.assume.json
+}
+
+data "aws_iam_policy_document" "po" {
+  statement {
+    sid       = "RunPoTask"
+    actions   = ["ecs:RunTask"]
+    resources = [replace(var.po_task_definition_arn, "/:\\d+$/", ":*")]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [var.cluster_arn]
+    }
+  }
+
+  statement {
+    sid       = "WaitForPoTask"
+    actions   = ["ecs:DescribeTasks", "ecs:StopTask"]
+    resources = ["*"]
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [var.cluster_arn]
+    }
+  }
+
+  statement {
+    sid       = "PassPoTaskRoles"
+    actions   = ["iam:PassRole"]
+    resources = [var.po_task_role_arn, var.po_execution_role_arn]
+  }
+
+  statement {
+    sid = "ManageEventBridgeRuleForRunTaskSync"
+    actions = [
+      "events:PutTargets",
+      "events:PutRule",
+      "events:DescribeRule",
+    ]
+    resources = [
+      "arn:aws:events:*:*:rule/StepFunctionsGetEventsForECSTaskRule",
+    ]
+  }
+
+  statement {
+    sid       = "WritePoStateMachineLogs"
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["${aws_cloudwatch_log_group.po.arn}:*"]
+  }
+
+  statement {
+    sid = "CreateLogDelivery"
+    actions = [
+      "logs:CreateLogDelivery",
+      "logs:GetLogDelivery",
+      "logs:UpdateLogDelivery",
+      "logs:DeleteLogDelivery",
+      "logs:ListLogDeliveries",
+      "logs:PutResourcePolicy",
+      "logs:DescribeResourcePolicies",
+      "logs:DescribeLogGroups",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "po" {
+  name   = "${local.po_state_machine_name}-policy"
+  role   = aws_iam_role.po.id
+  policy = data.aws_iam_policy_document.po.json
+}
+
+resource "aws_sfn_state_machine" "po" {
+  name     = local.po_state_machine_name
+  role_arn = aws_iam_role.po.arn
+
+  definition = templatefile("${path.module}/asl/po-issue-lifecycle.asl.json", {
+    cluster_arn            = var.cluster_arn
+    po_task_definition_arn = var.po_task_definition_arn
+    subnets                = var.subnets
+    security_group_id      = var.security_group_id
+  })
+
+  logging_configuration {
+    log_destination        = "${aws_cloudwatch_log_group.po.arn}:*"
     include_execution_data = true
     level                  = "ALL"
   }
