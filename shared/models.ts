@@ -220,7 +220,20 @@ const REGION = process.env.AWS_REGION ?? "eu-west-1";
 let _bedrock: BedrockRuntimeClient | undefined;
 function bedrock(): BedrockRuntimeClient {
   if (!_bedrock) {
-    _bedrock = new BedrockRuntimeClient({ region: REGION });
+    // Adaptive retry + 10 attempts: tight account-level Opus quotas on the
+    // dev account caused ThrottlingException to bubble through the SDK's
+    // default `standard` retry (3 attempts, 1s base delay) when PO first
+    // ran (issue #41, 2026-05-25). `adaptive` adjusts client-side rate
+    // limiting based on observed throttling, and 10 attempts gives the
+    // quota window enough time to release (Bedrock per-model invocation
+    // quotas are typically minute-grained on small dev accounts). Once
+    // the account-level Opus quota is raised via AWS Sales we can drop
+    // this back to standard retry — but adaptive is harmless either way.
+    _bedrock = new BedrockRuntimeClient({
+      region: REGION,
+      retryMode: "adaptive",
+      maxAttempts: 10,
+    });
   }
   return _bedrock;
 }
