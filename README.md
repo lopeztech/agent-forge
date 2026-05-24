@@ -64,7 +64,10 @@ Install dependencies:
 npm ci
 ```
 
-Run the TypeScript check:
+### Type-checking
+
+Run the TypeScript compiler in check-only mode before opening a PR or after
+making changes to shared types:
 
 ```bash
 npm run typecheck
