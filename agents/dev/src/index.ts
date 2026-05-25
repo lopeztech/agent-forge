@@ -35,6 +35,11 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
+import {
+  checkBudgetCaps,
+  formatBudgetTripComment,
+  type BudgetTrip,
+} from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile } from "../../../shared/github/areas.ts";
@@ -493,6 +498,24 @@ function buildPrBody(agentBody: string, issueNumber: number): string {
   return `${header}${agentBody}${footer}`;
 }
 
+// Comment posted when one of the day-scope caps (per-role / per-product /
+// global daily) was already tripped today, or just got tripped by today's
+// accumulated spend. Caps reset at UTC midnight; a human can clear the
+// trip earlier via the products row.
+function commentDayBudgetTripped(args: {
+  runId: string;
+  attempt: IterAttempt;
+  trip: BudgetTrip;
+}): string {
+  return [
+    `## Dev did not run (run \`${args.runId}\`)`,
+    "",
+    `Day-scope budget cap tripped before attempt ${args.attempt}.`,
+    "",
+    formatBudgetTripComment(args.trip),
+  ].join("\n");
+}
+
 // Comment posted when sum(spent) on the issue has already crossed the
 // per-issue cap before this attempt could even start the model call.
 function commentBudgetCapTripped(args: {
@@ -870,6 +893,35 @@ async function main(): Promise<void> {
         HUMAN_NEEDED_LABEL,
       );
       log({ msg: "budget cap tripped; parked", spent_so_far_usd: spentSoFar });
+      return;
+    }
+
+    // Day-scope caps (per-role daily, per-product daily, global daily).
+    // Reads existing trip flags first (cheap), then computes rollups if
+    // not already tripped. On overshoot, sets the flag for today's UTC
+    // date and parks the issue. Caps reset at UTC midnight by design.
+    const capCheck = await checkBudgetCaps({
+      productsTable: PRODUCTS_TABLE,
+      budgetLedgerTable: BUDGET_LEDGER_TABLE,
+      productId: PRODUCT_ID,
+      role: ROLE,
+      product,
+    });
+    if (!capCheck.ok) {
+      log({ msg: "day-scope budget cap tripped", trip: capCheck.trip });
+      await postComment(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        commentDayBudgetTripped({ runId, attempt, trip: capCheck.trip }),
+      );
+      await transitionLabel(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        STATE_LABELS.ready,
+        HUMAN_NEEDED_LABEL,
+      );
       return;
     }
 
