@@ -178,3 +178,72 @@ export async function transitionLabel(
   await removeLabel(opts, repo, issueNumber, fromLabel);
   await addLabels(opts, repo, issueNumber, [toLabel]);
 }
+
+// Look up the single open PR for a given head branch. Returns undefined if no
+// open PR exists (e.g. it was already merged or closed). Used by PO to find
+// the Dev-opened PR for an issue from the conventional branch name without
+// having to thread the PR number through issue_state.
+export async function findOpenPRByHead(
+  opts: RequestOptions,
+  repo: string,
+  headBranch: string,
+): Promise<{ number: number; html_url: string } | undefined> {
+  const owner = repo.split("/")[0]!;
+  const r = await ghOrThrow(
+    opts,
+    "GET",
+    `/repos/${repo}/pulls?state=open&head=${encodeURIComponent(
+      `${owner}:${headBranch}`,
+    )}`,
+  );
+  const list = (await r.json()) as Array<{ number: number; html_url: string }>;
+  return list[0];
+}
+
+export type MergePROpts = {
+  // Squash is the agent-forge default — PRs stack Dev + Test (+ optional
+  // Functional fixture) commits and a single squash commit on main keeps
+  // history clean. Per-product override lands when we need it.
+  mergeMethod?: "merge" | "squash" | "rebase";
+  commitTitle?: string;
+  commitMessage?: string;
+};
+
+export type MergePRResult =
+  | {
+      ok: true;
+      sha: string;
+    }
+  | {
+      ok: false;
+      // 405 = branch protection / not mergeable; 409 = head out of sync;
+      // 422 = no commits / conflict. Callers branch on the status.
+      status: number;
+      body: string;
+    };
+
+// PUT /repos/{repo}/pulls/{n}/merge. Distinct from creating a comment + label —
+// this is the privileged action that the merger App is for. PO is the only
+// role expected to call this; F.2.a wires it behind products.auto_merge.
+export async function mergePR(
+  opts: RequestOptions,
+  repo: string,
+  prNumber: number,
+  mergeOpts: MergePROpts = {},
+): Promise<MergePRResult> {
+  const body: Record<string, unknown> = {
+    merge_method: mergeOpts.mergeMethod ?? "squash",
+  };
+  if (mergeOpts.commitTitle !== undefined) body.commit_title = mergeOpts.commitTitle;
+  if (mergeOpts.commitMessage !== undefined) body.commit_message = mergeOpts.commitMessage;
+  const r = await gh(opts, "PUT", `/repos/${repo}/pulls/${prNumber}/merge`, body);
+  if (r.ok) {
+    const parsed = (await r.json()) as { sha: string; merged: boolean };
+    if (!parsed.merged) {
+      // 200 OK but merged=false would be unusual; treat as failure.
+      return { ok: false, status: 200, body: "GitHub returned merged=false" };
+    }
+    return { ok: true, sha: parsed.sha };
+  }
+  return { ok: false, status: r.status, body: await r.text() };
+}
