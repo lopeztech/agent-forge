@@ -41,6 +41,12 @@ import {
   type BudgetTrip,
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
+import {
+  RECORD_LESSON_TOOL,
+  buildMemoryBlock,
+  dispatchRecordLesson,
+} from "../../../shared/agent/memory-tool.ts";
+import { getLessons } from "../../../shared/state/team-memory.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -103,6 +109,7 @@ const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
 const AREA_LOCKS_TABLE = requiredEnv("AGENT_FORGE_AREA_LOCKS_TABLE");
+const TEAM_MEMORY_TABLE = requiredEnv("AGENT_FORGE_TEAM_MEMORY_TABLE");
 const LOCK_WAITERS_TABLE = requiredEnv("AGENT_FORGE_LOCK_WAITERS_TABLE");
 const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
@@ -296,9 +303,19 @@ Constraints:
 Do not produce free-form text outside the tool-call exchange.
 `.trim();
 
-function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
+function buildSystemBlocks(
+  spec: SpecReadResult,
+  memoryBlock: string,
+): SystemBlock[] {
+  const memoryBlocks: SystemBlock[] = memoryBlock
+    ? [{ type: "text", text: memoryBlock, cache_control: { type: "ephemeral" } }]
+    : [];
+
   if (spec.missing || spec.files.length === 0) {
-    return [{ type: "text", text: BASE_SYSTEM_PROMPT }];
+    return [
+      { type: "text", text: BASE_SYSTEM_PROMPT },
+      ...memoryBlocks,
+    ];
   }
 
   const specBlocks = spec.files
@@ -333,6 +350,7 @@ function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
       text: specBlockText,
       cache_control: { type: "ephemeral" },
     },
+    ...memoryBlocks,
   ];
 }
 
@@ -881,6 +899,16 @@ async function main(): Promise<void> {
       missing: spec.missing,
     });
 
+    // Team memory: load lessons from prior Dev runs on this product
+    // (plus org-global Dev lessons). usage_count bumps fire-and-forget.
+    const lessons = await getLessons({
+      tableName: TEAM_MEMORY_TABLE,
+      productId: PRODUCT_ID,
+      role: ROLE,
+    });
+    const memoryBlock = buildMemoryBlock(ROLE, lessons);
+    log({ msg: "loaded team memory", lessons: lessons.length });
+
     // 4. Resolve test command per Q5: explicit product config wins; npm test
     //    fallback when package.json exists; otherwise skip.
     const testCommand = await resolveTestCommand(workdir.path, product.test_command);
@@ -1028,6 +1056,16 @@ async function main(): Promise<void> {
         finalizeResult = f;
         return handleFinalizeResult(call.id, f);
       }
+      if (call.name === RECORD_LESSON_TOOL.name) {
+        const r = await dispatchRecordLesson({
+          tableName: TEAM_MEMORY_TABLE,
+          productId: PRODUCT_ID,
+          role: ROLE,
+          runId,
+          rawInput: call.input,
+        });
+        return wrapToolResult(call.id, r);
+      }
       const read = await dispatchReadTool(wd, call.name, call.input);
       if (read) return wrapToolResult(call.id, read);
       const write = await dispatchWriteTool(wd, call.name, call.input);
@@ -1036,7 +1074,7 @@ async function main(): Promise<void> {
         tool_use_id: call.id,
         content:
           `Unknown tool: ${call.name}. ` +
-          "Call one of read_file, list_directory, grep, write_file, bash, or submit_done.",
+          "Call one of read_file, list_directory, grep, write_file, bash, record_lesson, or submit_done.",
         is_error: true,
       };
     };
@@ -1044,11 +1082,12 @@ async function main(): Promise<void> {
     const tools = [
       ...buildReadToolDefinitions(),
       ...buildWriteToolDefinitions(),
+      RECORD_LESSON_TOOL,
       SUBMIT_DONE_TOOL,
     ];
     const loop = await runAgentLoop({
       model,
-      system: buildSystemBlocks(spec),
+      system: buildSystemBlocks(spec, memoryBlock),
       initialMessages: [{ role: "user", content: userMessage }],
       tools,
       executeTool,

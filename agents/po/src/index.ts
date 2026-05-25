@@ -1,4 +1,4 @@
-// Product Owner — Slice F.1.
+// Product Owner — Slice F.
 //
 // Trigger: issue gets label `state:awaiting-po` (Security transitions here
 // on outcome=clean).
@@ -13,16 +13,14 @@
 // through Opus 4.6 (the "best available Opus" the rest of the platform
 // already uses).
 //
-// Slice F.1 is REVIEW-ONLY:
-//   - approve    → post "recommend-merge" comment + park at human-needed
-//                  (human merges + transitions state:awaiting-po → state:done)
-//   - kickback   → post comment + park at human-needed
-//   - spec_ambig → post comment + park at human-needed
-//
-// Slice F.2 will:
-//   - approve → call the merger App's PR merge endpoint, transition
-//               state:awaiting-po → state:done
-//   - kickback → transition state:awaiting-po → state:in-dev + increment iter:N
+// Outcomes:
+//   - approve    → if products.auto_merge=true, merge through the merger App
+//                  and transition state:awaiting-po → state:done. Otherwise
+//                  post "recommend-merge" and park at human-needed.
+//   - kickback   → kick back to Dev by incrementing iter:N and transitioning
+//                  state:awaiting-po → state:ready. At iter:3 cap, park at
+//                  human-needed instead.
+//   - spec_ambig → post comment + park at human-needed.
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
@@ -33,6 +31,12 @@ import {
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
+import {
+  RECORD_LESSON_TOOL,
+  buildMemoryBlock,
+  dispatchRecordLesson,
+} from "../../../shared/agent/memory-tool.ts";
+import { getLessons } from "../../../shared/state/team-memory.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -87,6 +91,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const TEAM_MEMORY_TABLE = requiredEnv("AGENT_FORGE_TEAM_MEMORY_TABLE");
 const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 // Optional: only required when product.auto_merge is true. F.2.a wires PO's
 // merge call through the merger App (writer App can't merge against branch
@@ -177,10 +182,10 @@ Verdicts:
                     The issue or spec must change, not Dev. Pause for a
                     human.
 
-Slice F.1 is REVIEW-ONLY: even an approve verdict doesn't auto-merge —
-the wrapper posts a "recommend-merge" comment and parks at human-needed
-for a human to actually merge. That's the architecture's "first 30 days"
-approval-gate pattern.
+Approve verdicts auto-merge only when the product row has
+\`auto_merge=true\`. Otherwise the wrapper posts a "recommend-merge"
+comment and parks at human-needed for a human to merge. This supports the
+architecture's "first 30 days" approval-gate pattern.
 
 You CANNOT modify or commit code. You CANNOT merge PRs. Just review.
 
@@ -191,9 +196,9 @@ const SUBMIT_PO_VERDICT_TOOL: ToolDefinition = {
   name: "submit_po_verdict",
   description:
     "Declare PO review complete. verdict must be one of " +
-    "'approve' | 'kickback' | 'spec_ambig'. The wrapper posts a structured " +
-    "comment on the linked Issue and parks at human-needed (Slice F.1; F.2 " +
-    "will actually merge on approve and kick back to Dev on kickback).",
+    "'approve' | 'kickback' | 'spec_ambig'. approve auto-merges only when " +
+    "products.auto_merge=true; kickback returns to Dev unless the iter cap " +
+    "has been reached; spec_ambig always parks for human clarification.",
   input_schema: {
     type: "object",
     additionalProperties: false,
@@ -221,9 +226,18 @@ const SUBMIT_PO_VERDICT_TOOL: ToolDefinition = {
   },
 };
 
-function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
+function buildSystemBlocks(
+  spec: SpecReadResult,
+  memoryBlock: string,
+): SystemBlock[] {
+  const memoryBlocks: SystemBlock[] = memoryBlock
+    ? [{ type: "text", text: memoryBlock, cache_control: { type: "ephemeral" } }]
+    : [];
   if (spec.missing || spec.files.length === 0) {
-    return [{ type: "text", text: BASE_SYSTEM_PROMPT }];
+    return [
+      { type: "text", text: BASE_SYSTEM_PROMPT },
+      ...memoryBlocks,
+    ];
   }
   const specBlocks = spec.files
     .map((f) => `<file path="${f.path}">\n${f.content.trim()}\n</file>`)
@@ -239,6 +253,7 @@ function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
   return [
     { type: "text", text: BASE_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
     { type: "text", text: specText, cache_control: { type: "ephemeral" } },
+    ...memoryBlocks,
   ];
 }
 
@@ -707,6 +722,14 @@ async function main(): Promise<void> {
     });
     log({ msg: "read spec", spec_path: specPath, files: spec.files.length });
 
+    const lessons = await getLessons({
+      tableName: TEAM_MEMORY_TABLE,
+      productId: PRODUCT_ID,
+      role: ROLE,
+    });
+    const memoryBlock = buildMemoryBlock(ROLE, lessons);
+    log({ msg: "loaded team memory", lessons: lessons.length });
+
     // PO runs on Opus — the gate where a wrong merge costs more than the
     // model premium per CLAUDE.md → Roles → Product Owner.
     const model = getModelByTier("opus-4-6");
@@ -731,6 +754,16 @@ async function main(): Promise<void> {
           terminate: true,
         };
       }
+      if (call.name === RECORD_LESSON_TOOL.name) {
+        const r = await dispatchRecordLesson({
+          tableName: TEAM_MEMORY_TABLE,
+          productId: PRODUCT_ID,
+          role: ROLE,
+          runId,
+          rawInput: call.input,
+        });
+        return wrapToolResult(call.id, r);
+      }
       const read = await dispatchReadTool(wd, call.name, call.input);
       if (read) return wrapToolResult(call.id, read);
       const write = await dispatchWriteTool(wd, call.name, call.input);
@@ -739,7 +772,7 @@ async function main(): Promise<void> {
         tool_use_id: call.id,
         content:
           `Unknown tool: ${call.name}. Call one of read_file, list_directory, ` +
-          "grep, write_file, bash, or submit_po_verdict.",
+          "grep, write_file, bash, record_lesson, or submit_po_verdict.",
         is_error: true,
       };
     };
@@ -747,11 +780,12 @@ async function main(): Promise<void> {
     const tools = [
       ...buildReadToolDefinitions(),
       ...buildWriteToolDefinitions(),
+      RECORD_LESSON_TOOL,
       SUBMIT_PO_VERDICT_TOOL,
     ];
     const loop = await runAgentLoop({
       model,
-      system: buildSystemBlocks(spec),
+      system: buildSystemBlocks(spec, memoryBlock),
       initialMessages: [{ role: "user", content: userMessage }],
       tools,
       executeTool,

@@ -1,4 +1,4 @@
-// Security Reviewer — Slice E.1.
+// Security Reviewer — Slice E.
 //
 // Trigger: issue gets label `state:awaiting-security` (Functional transitions
 // here on outcome=passed).
@@ -9,15 +9,16 @@
 //   - bash for any ad-hoc inspection (grep for secrets, inspect lockfile
 //     diffs, etc.)
 //
-// Outcomes (E.1):
+// Outcomes:
 //   - clean (no findings, or only info/low/medium) → state:awaiting-po
-//   - blocked or high/critical findings           → park at human-needed
+//   - blocked or high/critical findings           → kick back to Dev
+//                                                     until iter:3 cap,
+//                                                     then human-needed
 //
-// E.2 will replace "blocked → park" with the kickback flow (transition to
-// state:in-dev + increment iter:N). E.2 will also wire the Opus escalation
-// per CLAUDE.md ("Opus 4.7 for diffs touching auth, crypto, payments, PII,
-// or anything tagged security-sensitive"). For Slice E.1 we always run
-// Sonnet 4.6 and the security-sensitive label is informational only.
+// Security-sensitive model escalation is not wired yet. Per CLAUDE.md, diffs
+// touching auth, crypto, payments, PII, or anything tagged security-sensitive
+// should eventually escalate to Opus; today that flag only tightens the
+// review prompt and Security still runs Sonnet 4.6.
 //
 // As of B2 (2026-05-25) the runtime image ships with semgrep + gitleaks
 // pre-installed (see agents/security/Dockerfile). The agent should call
@@ -32,6 +33,12 @@ import {
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
+import {
+  RECORD_LESSON_TOOL,
+  buildMemoryBlock,
+  dispatchRecordLesson,
+} from "../../../shared/agent/memory-tool.ts";
+import { getLessons } from "../../../shared/state/team-memory.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -87,6 +94,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const TEAM_MEMORY_TABLE = requiredEnv("AGENT_FORGE_TEAM_MEMORY_TABLE");
 const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
@@ -187,8 +195,8 @@ Outcome:
   - **findings**: findings exist but don't block. Posts as PR comment,
                   PO decides.
   - **blocked**:  high or critical finding. Parks the issue at
-                  human-needed (this slice; future slice kicks back to
-                  Dev).
+                  human-needed only when the Dev attempt cap is reached;
+                  otherwise kicks back to Dev.
 
 Anything labelled \`high\` or \`critical\` in worst_severity always blocks,
 regardless of \`outcome\`. So setting outcome=clean with worst=high is
@@ -236,9 +244,18 @@ const SUBMIT_SECURITY_DONE_TOOL: ToolDefinition = {
   },
 };
 
-function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
+function buildSystemBlocks(
+  spec: SpecReadResult,
+  memoryBlock: string,
+): SystemBlock[] {
+  const memoryBlocks: SystemBlock[] = memoryBlock
+    ? [{ type: "text", text: memoryBlock, cache_control: { type: "ephemeral" } }]
+    : [];
   if (spec.missing || spec.files.length === 0) {
-    return [{ type: "text", text: BASE_SYSTEM_PROMPT }];
+    return [
+      { type: "text", text: BASE_SYSTEM_PROMPT },
+      ...memoryBlocks,
+    ];
   }
   const specBlocks = spec.files
     .map((f) => `<file path="${f.path}">\n${f.content.trim()}\n</file>`)
@@ -256,6 +273,7 @@ function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
   return [
     { type: "text", text: BASE_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
     { type: "text", text: specText, cache_control: { type: "ephemeral" } },
+    ...memoryBlocks,
   ];
 }
 
@@ -550,6 +568,14 @@ async function main(): Promise<void> {
     });
     log({ msg: "read spec", spec_path: specPath, files: spec.files.length });
 
+    const lessons = await getLessons({
+      tableName: TEAM_MEMORY_TABLE,
+      productId: PRODUCT_ID,
+      role: ROLE,
+    });
+    const memoryBlock = buildMemoryBlock(ROLE, lessons);
+    log({ msg: "loaded team memory", lessons: lessons.length });
+
     const model = getModelByTier("sonnet-4-6");
     const userMessage = buildUserMessage({
       issue, baExpansion, branchName, securitySensitive,
@@ -575,6 +601,16 @@ async function main(): Promise<void> {
           terminate: true,
         };
       }
+      if (call.name === RECORD_LESSON_TOOL.name) {
+        const r = await dispatchRecordLesson({
+          tableName: TEAM_MEMORY_TABLE,
+          productId: PRODUCT_ID,
+          role: ROLE,
+          runId,
+          rawInput: call.input,
+        });
+        return wrapToolResult(call.id, r);
+      }
       const read = await dispatchReadTool(wd, call.name, call.input);
       if (read) return wrapToolResult(call.id, read);
       const write = await dispatchWriteTool(wd, call.name, call.input);
@@ -583,7 +619,7 @@ async function main(): Promise<void> {
         tool_use_id: call.id,
         content:
           `Unknown tool: ${call.name}. Call one of read_file, list_directory, ` +
-          "grep, write_file, bash, or submit_security_done.",
+          "grep, write_file, bash, record_lesson, or submit_security_done.",
         is_error: true,
       };
     };
@@ -591,11 +627,12 @@ async function main(): Promise<void> {
     const tools = [
       ...buildReadToolDefinitions(),
       ...buildWriteToolDefinitions(),
+      RECORD_LESSON_TOOL,
       SUBMIT_SECURITY_DONE_TOOL,
     ];
     const loop = await runAgentLoop({
       model,
-      system: buildSystemBlocks(spec),
+      system: buildSystemBlocks(spec, memoryBlock),
       initialMessages: [{ role: "user", content: userMessage }],
       tools,
       executeTool,

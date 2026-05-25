@@ -1,4 +1,4 @@
-// Functional Tester — Slice D.1.
+// Functional Tester — Slice D.
 //
 // Trigger: issue gets label `state:awaiting-functional` (Test transitions
 // here after pushing tests).
@@ -9,17 +9,15 @@
 //
 // Outcomes:
 //   - passed → transition state:awaiting-functional → state:awaiting-security
-//   - failed → park at human-needed (D.2 will wire the kickback flow:
-//              increment iter:N + transition back to state:in-dev for
-//              another Dev attempt)
+//   - failed → kick back to Dev by incrementing iter:N and transitioning
+//              state:awaiting-functional → state:ready. At iter:3 cap,
+//              park at human-needed instead.
 //
 // Tools: read_file, list_directory, grep, bash (no write_file — Functional
 // is read-only). The bash tool is the workhorse: run the test suite, run
 // smoke scripts, run the app's CLI, etc.
 //
-// Out of scope this slice:
-//   - Kickback to Dev on `failed` (today: parks at human-needed; D.2 will
-//     transition to state:in-dev and increment iter:N).
+// Still out of scope:
 //   - PR-side comments (posts on the Issue only).
 //   - `warm` runtime mode for products with heavy stateful deps (per
 //     CLAUDE.md products.functional_runtime_mode).
@@ -33,6 +31,12 @@ import {
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
+import {
+  RECORD_LESSON_TOOL,
+  buildMemoryBlock,
+  dispatchRecordLesson,
+} from "../../../shared/agent/memory-tool.ts";
+import { getLessons } from "../../../shared/state/team-memory.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -83,6 +87,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const TEAM_MEMORY_TABLE = requiredEnv("AGENT_FORGE_TEAM_MEMORY_TABLE");
 const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
@@ -144,9 +149,10 @@ The shallow clone is already checked out to the PR branch. You have:
                                      output. cwd defaults to repo root.
 - submit_functional_done(outcome, summary, evidence) — TERMINAL.
                                      outcome="passed" hands off to
-                                     Security; outcome="failed" parks the
-                                     issue at human-needed (this slice;
-                                     future slice will kick back to Dev).
+                                     Security; outcome="failed" kicks back
+                                     to Dev unless the issue is already at
+                                     the iter:3 cap, where it parks at
+                                     human-needed.
 
 Approach:
 
@@ -177,8 +183,8 @@ const SUBMIT_FUNCTIONAL_DONE_TOOL: ToolDefinition = {
     "Declare functional verification complete. outcome must be 'passed' or " +
     "'failed'. Posted as a structured PR-style comment on the linked Issue. " +
     "On passed: wrapper transitions state:awaiting-functional → " +
-    "state:awaiting-security. On failed: wrapper parks at human-needed " +
-    "(future slice will kick back to Dev).",
+    "state:awaiting-security. On failed: wrapper kicks back to Dev unless " +
+    "the issue is already at iter:3, where it parks at human-needed.",
   input_schema: {
     type: "object",
     additionalProperties: false,
@@ -206,9 +212,18 @@ const SUBMIT_FUNCTIONAL_DONE_TOOL: ToolDefinition = {
   },
 };
 
-function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
+function buildSystemBlocks(
+  spec: SpecReadResult,
+  memoryBlock: string,
+): SystemBlock[] {
+  const memoryBlocks: SystemBlock[] = memoryBlock
+    ? [{ type: "text", text: memoryBlock, cache_control: { type: "ephemeral" } }]
+    : [];
   if (spec.missing || spec.files.length === 0) {
-    return [{ type: "text", text: BASE_SYSTEM_PROMPT }];
+    return [
+      { type: "text", text: BASE_SYSTEM_PROMPT },
+      ...memoryBlocks,
+    ];
   }
   const specBlocks = spec.files
     .map((f) => `<file path="${f.path}">\n${f.content.trim()}\n</file>`)
@@ -224,6 +239,7 @@ function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
   return [
     { type: "text", text: BASE_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
     { type: "text", text: specText, cache_control: { type: "ephemeral" } },
+    ...memoryBlocks,
   ];
 }
 
@@ -525,6 +541,14 @@ async function main(): Promise<void> {
     const testCommand = await resolveTestCommand(workdir.path, product.test_command);
     log({ msg: "resolved test_command", command: testCommand ?? "(none)" });
 
+    const lessons = await getLessons({
+      tableName: TEAM_MEMORY_TABLE,
+      productId: PRODUCT_ID,
+      role: ROLE,
+    });
+    const memoryBlock = buildMemoryBlock(ROLE, lessons);
+    log({ msg: "loaded team memory", lessons: lessons.length });
+
     const model = getModelByTier("sonnet-4-6");
     const userMessage = buildUserMessage({
       issue, baExpansion, branchName, testCommand,
@@ -549,6 +573,16 @@ async function main(): Promise<void> {
           terminate: true,
         };
       }
+      if (call.name === RECORD_LESSON_TOOL.name) {
+        const r = await dispatchRecordLesson({
+          tableName: TEAM_MEMORY_TABLE,
+          productId: PRODUCT_ID,
+          role: ROLE,
+          runId,
+          rawInput: call.input,
+        });
+        return wrapToolResult(call.id, r);
+      }
       const read = await dispatchReadTool(wd, call.name, call.input);
       if (read) return wrapToolResult(call.id, read);
       const write = await dispatchWriteTool(wd, call.name, call.input);
@@ -557,7 +591,7 @@ async function main(): Promise<void> {
         tool_use_id: call.id,
         content:
           `Unknown tool: ${call.name}. Call one of read_file, list_directory, ` +
-          "grep, write_file, bash, or submit_functional_done.",
+          "grep, write_file, bash, record_lesson, or submit_functional_done.",
         is_error: true,
       };
     };
@@ -565,11 +599,12 @@ async function main(): Promise<void> {
     const tools = [
       ...buildReadToolDefinitions(),
       ...buildWriteToolDefinitions(),
+      RECORD_LESSON_TOOL,
       SUBMIT_FUNCTIONAL_DONE_TOOL,
     ];
     const loop = await runAgentLoop({
       model,
-      system: buildSystemBlocks(spec),
+      system: buildSystemBlocks(spec, memoryBlock),
       initialMessages: [{ role: "user", content: userMessage }],
       tools,
       executeTool,
