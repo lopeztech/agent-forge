@@ -86,6 +86,21 @@ data "aws_iam_policy_document" "this" {
     actions   = ["bedrock:InvokeModel"]
     resources = var.bedrock_model_arns
   }
+
+  # Forensic-report dump on the two unexpected-park paths. Scoped to the
+  # cost-estimator's own key prefix so a misbehaving Lambda can't clobber
+  # other roles' blobs. Matches the per-Fargate-role grant in
+  # infra/modules/agent-role/main.tf.
+  dynamic "statement" {
+    for_each = var.forensic_bucket_arn != "" ? [1] : []
+    content {
+      sid     = "PutForensicArtifacts"
+      actions = ["s3:PutObject"]
+      resources = [
+        "${var.forensic_bucket_arn}/*/*/cost-estimator-*.json",
+      ]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -121,6 +136,7 @@ resource "aws_lambda_function" "this" {
       DEFAULT_COST_APPROVAL_THRESHOLD_USD = tostring(var.default_cost_approval_threshold_usd)
       # shared/models.ts reads this; lazy no-op when unset.
       AGENT_FORGE_RATE_LIMITS_TABLE = var.rate_limits_table_name
+      AGENT_FORGE_FORENSIC_BUCKET   = var.forensic_bucket_name
     }
   }
 

@@ -19,10 +19,9 @@
 // or anything tagged security-sensitive"). For Slice E.1 we always run
 // Sonnet 4.6 and the security-sensitive label is informational only.
 //
-// Slice E.1 does NOT pre-install semgrep or gitleaks. The agent can install
-// them via bash if it decides they're needed; the Dockerfile carries the
-// minimum (git + bash + ca-certs). E.2 will add semgrep + gitleaks to the
-// runtime image so the agent doesn't pay the install cost per run.
+// As of B2 (2026-05-25) the runtime image ships with semgrep + gitleaks
+// pre-installed (see agents/security/Dockerfile). The agent should call
+// them directly via bash without a per-run install step.
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
@@ -142,26 +141,32 @@ The shallow clone is checked out to the PR branch. You have:
                                      committed; the workdir is thrown away
                                      after the loop.
 - bash(cmd, cwd?, timeout_seconds?) — /bin/bash -c. Use for:
-                                       * \`npm audit --omit=dev\`
+                                       * \`semgrep scan --error\`  (SAST,
+                                         pre-installed)
+                                       * \`gitleaks dir .\`  (secret scan
+                                         on the working tree)
+                                       * \`gitleaks git --redact\`  (secret
+                                         scan across the diff's history)
+                                       * \`npm audit --omit=dev\`  (CVE
+                                         scan if package.json is present)
                                        * \`git log --oneline origin/HEAD..HEAD\`
                                        * \`git diff origin/HEAD..HEAD -- <path>\`
-                                       * \`grep\` for secrets (API keys,
-                                         JWTs, "BEGIN PRIVATE KEY", etc.)
+                                       * \`grep\` for additional secret
+                                         patterns the scanners might miss
                                        * ad-hoc \`find\` / \`sed\` to inspect
-                                     If you decide you need semgrep or
-                                     gitleaks, install them via apk / pip /
-                                     go install on the fly.
 - submit_security_done(outcome, worst_severity, summary, findings) —
                                      TERMINAL.
 
 What to look at (this is a guide, not exhaustive):
 
   1. \`git diff origin/HEAD..HEAD\` — every code change.
-  2. \`npm audit --omit=dev\` (if package.json present) — known CVEs.
-  3. grep / read_file for hardcoded secrets in the diff
-     (AWS keys, GitHub tokens, "password =", "BEGIN PRIVATE KEY",
-     \`process.env.X = "literal"\`, etc.).
-  4. LLM-grade review of the diff for OWASP Top 10 concerns: injection,
+  2. \`semgrep scan --error --quiet\` — SAST. Default registry covers a
+     broad set of OWASP-aligned rules; use \`--config=auto\` or pin a
+     specific ruleset if you want narrower coverage.
+  3. \`gitleaks dir .\` and \`gitleaks git --redact\` — secret scanning
+     (working tree + commit history on this branch). Cheap; run by default.
+  4. \`npm audit --omit=dev\` (if package.json present) — known CVEs.
+  5. LLM-grade review of the diff for OWASP Top 10 concerns: injection,
      broken auth, sensitive data exposure, SSRF, XXE, deserialization,
      known-bad dependencies, etc. Use your judgment — most diffs are
      boring docs/config; a small fraction genuinely matter.

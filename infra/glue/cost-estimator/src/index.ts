@@ -22,6 +22,7 @@
 //   - Any GitHub or DDB call fails after the model call (estimate was made
 //     but couldn't be acted on — human should look)
 
+import { makeParkDumper } from "../../../../shared/forensic/dump.ts";
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import { postComment, transitionLabel } from "../../../../shared/github/repo.ts";
 import {
@@ -54,6 +55,7 @@ const PRODUCTS_TABLE = requiredEnv("PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("BUDGET_LEDGER_TABLE");
 const APP_SECRET_NAME = requiredEnv("APP_SECRET_NAME");
+const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const HARD_PER_ISSUE_CAP_USD = Number(
   process.env.HARD_PER_ISSUE_CAP_USD ?? "12",
 );
@@ -443,12 +445,18 @@ async function parkAsFailure(
   repo: string,
   issueNumber: number,
   reason: string,
+  forensicUri?: string,
 ): Promise<void> {
+  const body =
+    `🤖 **Cost Estimator failed.** Parking with \`human-needed\` — please clear the label after investigating.\n\n> ${reason.replace(/\n/g, "\n> ")}` +
+    (forensicUri
+      ? `\n\n<sub>Forensic dump: \`${forensicUri}\` (\`aws s3 cp <uri> -\` to inspect).</sub>`
+      : "");
   await postComment(
     { token, userAgent: USER_AGENT },
     repo,
     issueNumber,
-    `🤖 **Cost Estimator failed.** Parking with \`human-needed\` — please clear the label after investigating.\n\n> ${reason.replace(/\n/g, "\n> ")}`,
+    body,
   );
   await transitionLabel(
     { token, userAgent: USER_AGENT },
@@ -504,6 +512,20 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
   const baExpansion = await fetchBAExpansion(product_id, issue.number);
   log({ msg: "ba_expansion lookup", present: Boolean(baExpansion) });
 
+  // Park-time forensic dump. Captures a structured "why we parked" record
+  // to S3 + appends a pointer to issue_state.forensic_reports[]. Covers the
+  // two unexpected-park paths per the 2026-05-25 decision: Bedrock 5xx /
+  // timeout, and post-estimate side-effect failure. No-op when
+  // FORENSIC_BUCKET is unset (local-dev convenience).
+  const dumpForensicForPark = makeParkDumper({
+    bucket: FORENSIC_BUCKET,
+    issueStateTable: ISSUE_STATE_TABLE,
+    productId: product_id,
+    issueNumber: issue.number,
+    role: "cost-estimator",
+    log,
+  });
+
   // ---- run the estimator ------------------------------------------------
   let estimatorOutput: Awaited<ReturnType<typeof runEstimator>>;
   try {
@@ -511,7 +533,21 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log({ msg: "estimator threw; parking", error: msg });
-    await parkAsFailure(token, repo, issue.number, `Estimator error: ${msg}`);
+    const forensicUri = await dumpForensicForPark({
+      reason: `Estimator threw (Bedrock 5xx / timeout / parse error): ${msg.slice(0, 200)}`,
+      runId,
+      extra: {
+        error_message: msg,
+        ba_expansion_present: Boolean(baExpansion),
+      },
+    });
+    await parkAsFailure(
+      token,
+      repo,
+      issue.number,
+      `Estimator error: ${msg}`,
+      forensicUri,
+    );
     // Even on failure, log a (zero/best-effort) ledger row so the run is auditable.
     await recordSpend({
       tableName: BUDGET_LEDGER_TABLE,
@@ -579,12 +615,24 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log({ msg: "post-estimate side-effect failed; parking", error: msg });
+    const forensicUri = await dumpForensicForPark({
+      reason: `Estimator succeeded but post-estimate side-effect failed: ${msg.slice(0, 200)}`,
+      runId,
+      costUsd: estimatorCostUsd,
+      extra: {
+        error_message: msg,
+        estimate: { p50_total_usd: totals.p50_total_usd, p90_total_usd: totals.p90_total_usd },
+        decision: decision.kind,
+        comment_posted_id: postedCommentId,
+      },
+    });
     // Don't double-fail if parking itself errors — let it bubble.
     await parkAsFailure(
       token,
       repo,
       issue.number,
       `Estimate succeeded but follow-up failed: ${msg}`,
+      forensicUri,
     );
     // Still record spend below — the model call did happen.
   }
