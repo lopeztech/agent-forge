@@ -144,12 +144,18 @@ module "agent_dev" {
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
     AGENT_FORGE_AREA_LOCKS_TABLE    = module.dynamodb.table_names["area_locks"]
+    AGENT_FORGE_LOCK_WAITERS_TABLE  = module.dynamodb.table_names["lock_waiters"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
+    # Phase C: shared/locks/area-locks.ts PutEvents `area-lock-released`
+    # here on every successful release. The sweeper Lambda subscribes via
+    # an EventBridge rule on the same bus.
+    AGENT_FORGE_EVENT_BUS_NAME = module.eventbridge.bus_name
   }
 
   # Dev needs read on products + the same write surface as BA, plus area_locks
   # (Get/Put/Update for the conditional-write acquire path, Delete via the
-  # broader policy below).
+  # broader policy below). Phase C adds lock_waiters (Put/Query/Delete via
+  # the broader policy).
   dynamodb_table_arns = {
     products      = module.dynamodb.table_arns["products"]
     issue_state   = module.dynamodb.table_arns["issue_state"]
@@ -157,9 +163,13 @@ module "agent_dev" {
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
     rate_limits   = module.dynamodb.table_arns["rate_limits"]
     area_locks    = module.dynamodb.table_arns["area_locks"]
+    lock_waiters  = module.dynamodb.table_arns["lock_waiters"]
   }
 
   forensic_bucket_arn = module.forensic_artifacts.bucket_arn
+
+  # Phase C: events:PutEvents to the agent-forge bus for `area-lock-released`.
+  event_bus_arn = module.eventbridge.bus_arn
 
   # Complexity-driven tier routing (tierForDev): Haiku for trivial issues,
   # Sonnet for small/medium (default), Opus for large + the attempt-3

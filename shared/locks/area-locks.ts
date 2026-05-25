@@ -9,6 +9,10 @@ import {
   DynamoDBClient,
 } from "@aws-sdk/client-dynamodb";
 import {
+  EventBridgeClient,
+  PutEventsCommand,
+} from "@aws-sdk/client-eventbridge";
+import {
   DeleteCommand,
   DynamoDBDocumentClient,
   PutCommand,
@@ -24,6 +28,58 @@ function ddb(): DynamoDBDocumentClient {
     );
   }
   return _ddb;
+}
+
+let _eb: EventBridgeClient | undefined;
+function eb(): EventBridgeClient {
+  if (!_eb) _eb = new EventBridgeClient({ region: REGION });
+  return _eb;
+}
+
+// Phase C — when the sweeper Lambda is wired (release fires an
+// `area-lock-released` EventBridge event per area, the sweeper picks the
+// oldest waiter and re-fires Dev). No-op when env is unset (local dev).
+const EVENT_BUS_NAME = process.env.AGENT_FORGE_EVENT_BUS_NAME;
+const EVENT_SOURCE = "agent-forge.area-locks";
+const EVENT_DETAIL_TYPE = "area-lock-released";
+
+async function emitAreaLockReleased(
+  productId: string,
+  areaId: string,
+): Promise<void> {
+  if (!EVENT_BUS_NAME) return;
+  try {
+    await eb().send(
+      new PutEventsCommand({
+        Entries: [
+          {
+            EventBusName: EVENT_BUS_NAME,
+            Source: EVENT_SOURCE,
+            DetailType: EVENT_DETAIL_TYPE,
+            Detail: JSON.stringify({
+              product_id: productId,
+              area_id: areaId,
+              released_at: new Date().toISOString(),
+            }),
+          },
+        ],
+      }),
+    );
+  } catch (err) {
+    // Best-effort. A missed event means the next Dev attempt on this
+    // product/area will be triggered by some other mechanism (next
+    // webhook, manual re-fire, or the TTL on the waiter row eventually
+    // pruning it). Failing the release call is much worse — the lock
+    // would stay held until DDB TTL purges it.
+    console.warn(
+      JSON.stringify({
+        msg: "area-lock-released PutEvents failed (non-fatal)",
+        product_id: productId,
+        area_id: areaId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
 }
 
 export type AreaLockRequest = {
@@ -152,6 +208,7 @@ export async function releaseAreaLocks(
 ): Promise<void> {
   await Promise.all(
     normalizeAreaIds(opts.areaIds).map(async (areaId) => {
+      let released = false;
       try {
         await ddb().send(
           new DeleteCommand({
@@ -166,10 +223,19 @@ export async function releaseAreaLocks(
             },
           }),
         );
+        released = true;
       } catch (err) {
         if (!isConditionalCheckFailed(err)) {
           throw err;
         }
+        // Conditional-check fail: another owner holds the lock (or it's
+        // already gone via TTL). Don't emit — there's no genuine
+        // transition for waiters to act on.
+      }
+      if (released) {
+        // Sweeper Lambda subscribes to these and re-fires Dev for the
+        // oldest waiter on this (product, area).
+        await emitAreaLockReleased(opts.productId, areaId);
       }
     }),
   );
