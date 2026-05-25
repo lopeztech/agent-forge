@@ -65,6 +65,19 @@ export function hasComplexityHighLabel(
   return labels.some((l) => l.name === FLAG_LABELS.complexityHigh);
 }
 
+// Picks the next iter:N attempt given the current one. Used by Test /
+// Functional / Security / PO kickback paths: if at the cap (iter:3) they
+// park at human-needed instead of looping forever. Defensively defaults
+// undefined to 1 so the first kickback after a missing label still bumps
+// to iter:2 rather than re-applying iter:1.
+export function nextIterAttempt(
+  current: IterAttempt | undefined,
+): IterAttempt | "cap" {
+  const c = current ?? 1;
+  if (c >= 3) return "cap";
+  return (c + 1) as IterAttempt;
+}
+
 export const AREA_LABEL_PREFIX = "area:";
 export const AREA_ALL_LABEL = "area:*";
 

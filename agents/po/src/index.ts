@@ -26,6 +26,7 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
+import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -50,6 +51,7 @@ import {
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
+  parseIterLabel,
 } from "../../../shared/labels.ts";
 import {
   costUsd,
@@ -337,20 +339,37 @@ function commentPoMergeFailed(args: {
   ].filter((s) => s !== "").join("\n");
 }
 
-function commentPoKickback(args: {
+function commentPoKickbackToDev(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  report: POReport;
+  newAttempt: number;
+  kickbackCount: number;
+}): string {
+  return [
+    `## PO review: KICKBACK (Slice F.2.b, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    "",
+    args.report.summary,
+    "",
+    args.report.details ? "### Deltas to fix\n\n" + args.report.details + "\n" : "",
+    `Kicking back to Dev — transitioning \`${STATE_LABELS.awaitingPo}\` → \`${STATE_LABELS.ready}\` with \`iter:${args.newAttempt}\`. (Kickback count for this issue: ${args.kickbackCount}.)`,
+  ].filter((s) => s !== "").join("\n");
+}
+
+function commentPoKickbackCapped(args: {
   runId: string;
   modelId: string;
   turns: number;
   report: POReport;
 }): string {
   return [
-    `## PO review: KICKBACK (Slice F.1, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    `## PO review: KICKBACK → AT CAP (Slice F.2.b, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
     "",
     args.report.summary,
     "",
     args.report.details ? "### Deltas to fix\n\n" + args.report.details + "\n" : "",
-    `Parking at \`${HUMAN_NEEDED_LABEL}\`. Slice F.2 will instead transition ` +
-      "to `state:in-dev` + increment `iter:N` for a re-run.",
+    `Already at \`iter:3\` (the per-issue Dev attempt cap). Parking at \`${HUMAN_NEEDED_LABEL}\` rather than re-kickback. A human should rescope the issue, accept the PR as-is, or close it.`,
   ].filter((s) => s !== "").join("\n");
 }
 
@@ -772,25 +791,60 @@ async function main(): Promise<void> {
         );
       }
     } else if (capturedReport && capturedReport.verdict === "kickback") {
-      await postComment(
+      // F.2.b: kickback to Dev unless at iter:3 cap.
+      const currentAttempt = parseIterLabel(issue.labels ?? []);
+      const k = await kickbackToDev({
         ghOpts,
-        REPO,
-        ISSUE_NUMBER,
-        commentPoKickback({
-          runId,
-          modelId: model.bedrockModelId,
-          turns: loop.turns,
-          report: capturedReport,
-        }),
-      );
-      // F.2 will transition state:awaiting-po → state:in-dev + bump iter:N.
-      await transitionLabel(
-        ghOpts,
-        REPO,
-        ISSUE_NUMBER,
-        STATE_LABELS.awaitingPo,
-        HUMAN_NEEDED_LABEL,
-      );
+        repo: REPO,
+        issueNumber: ISSUE_NUMBER,
+        currentState: STATE_LABELS.awaitingPo,
+        currentAttempt,
+        issueStateTable: ISSUE_STATE_TABLE,
+        productId: PRODUCT_ID,
+        fromRole: ROLE,
+        runId,
+      });
+      if (k.kind === "kickback") {
+        log({
+          msg: "kicked back to Dev",
+          from_state: STATE_LABELS.awaitingPo,
+          new_attempt: k.newAttempt,
+          kickback_count: k.kickbackCount,
+        });
+        await postComment(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          commentPoKickbackToDev({
+            runId,
+            modelId: model.bedrockModelId,
+            turns: loop.turns,
+            report: capturedReport,
+            newAttempt: k.newAttempt,
+            kickbackCount: k.kickbackCount,
+          }),
+        );
+      } else {
+        log({ msg: "at iter cap; parking instead of kicking back" });
+        await postComment(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          commentPoKickbackCapped({
+            runId,
+            modelId: model.bedrockModelId,
+            turns: loop.turns,
+            report: capturedReport,
+          }),
+        );
+        await transitionLabel(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          STATE_LABELS.awaitingPo,
+          HUMAN_NEEDED_LABEL,
+        );
+      }
     } else if (capturedReport && capturedReport.verdict === "spec_ambig") {
       await postComment(
         ghOpts,
