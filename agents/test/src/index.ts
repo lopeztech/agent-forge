@@ -26,12 +26,13 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
-import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import {
   checkBudgetCaps,
   formatBudgetTripComment,
   type BudgetTrip,
 } from "../../../shared/budget/caps.ts";
+import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
+import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -53,6 +54,7 @@ import {
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
+  parseIterLabel,
 } from "../../../shared/labels.ts";
 import {
   costUsd,
@@ -143,13 +145,20 @@ The shallow clone is already checked out to the PR branch. You have:
 - read_file(path)                   — fetch one file (100 KB cap).
 - write_file(path, content)         — overwrite or create a file (1 MB cap).
 - bash(cmd, cwd?, timeout_seconds?) — /bin/bash -c; cwd defaults to repo root.
-- submit_tests_done(summary, coverage_notes) — TERMINAL on success: wrapper
+- submit_tests_done(outcome, summary, coverage_notes) — TERMINAL.
+                                      outcome="passed": wrapper
                                       auto-commits any uncommitted changes,
                                       re-runs the test command as the gate,
                                       pushes the branch, transitions the
                                       issue to state:awaiting-functional. On
                                       tests_failed / no_changes the wrapper
                                       hands control back so you can fix.
+                                      outcome="needs_dev_change": wrapper
+                                      kicks back to Dev — increments iter:N,
+                                      transitions state:awaiting-tests →
+                                      state:ready, posts coverage_notes as
+                                      the kickback comment. Any uncommitted
+                                      test files you wrote are discarded.
 
 Recommended flow:
 
@@ -160,14 +169,25 @@ Recommended flow:
      learn the convention.
   5. write_file new test files covering each acceptance criterion.
   6. bash to run the test command. Iterate until green.
-  7. Call submit_tests_done with a brief summary + which acceptance criteria
-     each test covers.
+  7. Call submit_tests_done with outcome="passed", a brief summary, and
+     which acceptance criteria each test covers.
+
+When to use outcome="needs_dev_change":
+- The PR has a clear bug you'd need to fix to make tests pass (e.g. wrong
+  return type, missing null check, off-by-one). Fixing product bugs is
+  Dev's job, not Test's — kick back with a specific delta.
+- The change can't be exercised without a Dev-side hook (e.g. an internal
+  symbol needs to be exported, a hardcoded value needs to become an arg,
+  a side-effect needs to become observable). Describe the exact change
+  Dev should make.
+- DON'T use needs_dev_change for tests that you couldn't figure out how
+  to write — that's an outcome="passed" with frank coverage_notes about
+  what you skipped. needs_dev_change is reserved for cases where the
+  product code itself needs to change.
 
 Constraints:
 - Stay on the PR branch. Don't merge, don't open new PRs.
-- Don't disable failing tests to make them pass. If a test legitimately can't
-  pass without a Dev-side change, surface it in coverage_notes and let the
-  wrapper park the issue — the PR review flow will kick back to Dev.
+- Don't disable failing tests to make them pass.
 - Don't exfiltrate secrets via bash. The Fargate task has IAM credentials
   reachable via instance metadata; treat that surface as off-limits.
 
@@ -177,28 +197,39 @@ Do not produce free-form text outside the tool-call exchange.
 const SUBMIT_TESTS_DONE_TOOL: ToolDefinition = {
   name: "submit_tests_done",
   description:
-    "Declare that test coverage is complete and ready to push. The wrapper " +
-    "auto-commits any uncommitted changes, re-runs the test command, pushes " +
-    "the PR branch, and transitions the issue to state:awaiting-functional. " +
-    "If tests fail or no changes were made, you get an error and can keep " +
-    "working — only the success path is terminal.",
+    "Declare Test's verdict on this PR. outcome=passed: wrapper auto-commits " +
+    "any uncommitted changes, re-runs the test command, pushes the PR branch, " +
+    "and transitions the issue to state:awaiting-functional (if tests fail or " +
+    "no changes were made the wrapper hands control back to you so you can " +
+    "fix). outcome=needs_dev_change: wrapper kicks back to Dev — bumps iter:N " +
+    "and transitions state:awaiting-tests → state:ready. Uncommitted test " +
+    "files you wrote are discarded.",
   input_schema: {
     type: "object",
     additionalProperties: false,
-    required: ["summary", "coverage_notes"],
+    required: ["outcome", "summary", "coverage_notes"],
     properties: {
+      outcome: {
+        enum: ["passed", "needs_dev_change"],
+        description:
+          "passed: tests added, all green. needs_dev_change: PR has a bug " +
+          "or missing testability hook that requires a Dev-side change " +
+          "before tests can meaningfully cover it.",
+      },
       summary: {
         type: "string",
         description:
-          "1-2 sentence high-level description of what was tested. Used as the " +
-          "auto-commit message.",
+          "1-2 sentence high-level verdict. Used as the auto-commit message " +
+          "on passed; used as the kickback comment headline on " +
+          "needs_dev_change.",
       },
       coverage_notes: {
         type: "string",
         description:
-          "Markdown listing each acceptance criterion you tested and how. " +
-          "Mention any criteria you could not cover and why (e.g. needs a " +
-          "Dev-side change). Posted as an issue comment.",
+          "For passed: markdown listing each acceptance criterion you " +
+          "tested and how. For needs_dev_change: the specific deltas Dev " +
+          "must make (file:line, what to change, why), mapped to acceptance " +
+          "criteria. Posted as the issue comment.",
       },
     },
   },
@@ -279,6 +310,44 @@ function commentTestsAdded(args: {
     `Pushed to PR branch at \`${args.pushedHead.slice(0, 12)}\`.`,
     "",
     `Transitioning \`${STATE_LABELS.awaitingTests}\` → \`${STATE_LABELS.awaitingFunctional}\`.`,
+  ].filter((s) => s !== "").join("\n");
+}
+
+function commentTestKickback(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  submission: TestSubmission;
+  newAttempt: number;
+  kickbackCount: number;
+}): string {
+  return [
+    `## Test: NEEDS DEV CHANGE → KICKBACK (Slice C, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    "",
+    args.submission.summary,
+    "",
+    args.submission.coverage_notes
+      ? "### Deltas to fix\n\n" + args.submission.coverage_notes + "\n"
+      : "",
+    `Kicking back to Dev — transitioning \`${STATE_LABELS.awaitingTests}\` → \`${STATE_LABELS.ready}\` with \`iter:${args.newAttempt}\`. (Kickback count for this issue: ${args.kickbackCount}.)`,
+  ].filter((s) => s !== "").join("\n");
+}
+
+function commentTestKickbackCapped(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  submission: TestSubmission;
+}): string {
+  return [
+    `## Test: NEEDS DEV CHANGE → AT CAP (Slice C, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    "",
+    args.submission.summary,
+    "",
+    args.submission.coverage_notes
+      ? "### Deltas to fix\n\n" + args.submission.coverage_notes + "\n"
+      : "",
+    `Already at \`iter:3\` (the per-issue Dev attempt cap). Parking at \`${HUMAN_NEEDED_LABEL}\` rather than re-kickback. A human should rescope the issue or accept the gap in coverage.`,
   ].filter((s) => s !== "").join("\n");
 }
 
@@ -587,6 +656,19 @@ async function main(): Promise<void> {
           raw: call.input,
           normalized: submission,
         });
+        if (submission.outcome === "needs_dev_change") {
+          // No finalize on kickback — wrapper discards in-flight test work and
+          // hands the branch back to Dev. The loop ends here; main() does the
+          // actual kickback after the loop returns.
+          return {
+            tool_use_id: call.id,
+            content:
+              `Kickback recorded (outcome=needs_dev_change). The loop ends here; ` +
+              "wrapper will transition the issue back to state:ready and Dev " +
+              "picks it up.",
+            terminate: true,
+          };
+        }
         const f = await finalizeTest({
           workdir: wd,
           branchName,
@@ -659,6 +741,65 @@ async function main(): Promise<void> {
         STATE_LABELS.awaitingTests,
         STATE_LABELS.awaitingFunctional,
       );
+    } else if (
+      capturedSubmission !== undefined &&
+      capturedSubmission.outcome === "needs_dev_change"
+    ) {
+      // B1: agent declared the PR needs Dev-side changes before tests can
+      // cover it. Reuse the shared kickback helper. Cap-park if at iter:3.
+      const currentAttempt = parseIterLabel(issue.labels ?? []);
+      const k = await kickbackToDev({
+        ghOpts,
+        repo: REPO,
+        issueNumber: ISSUE_NUMBER,
+        currentState: STATE_LABELS.awaitingTests,
+        currentAttempt,
+        issueStateTable: ISSUE_STATE_TABLE,
+        productId: PRODUCT_ID,
+        fromRole: ROLE,
+        runId,
+      });
+      if (k.kind === "kickback") {
+        log({
+          msg: "kicked back to Dev",
+          from_state: STATE_LABELS.awaitingTests,
+          new_attempt: k.newAttempt,
+          kickback_count: k.kickbackCount,
+        });
+        await postComment(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          commentTestKickback({
+            runId,
+            modelId: model.bedrockModelId,
+            turns: loop.turns,
+            submission: capturedSubmission,
+            newAttempt: k.newAttempt,
+            kickbackCount: k.kickbackCount,
+          }),
+        );
+      } else {
+        log({ msg: "at iter cap; parking instead of kicking back" });
+        await postComment(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          commentTestKickbackCapped({
+            runId,
+            modelId: model.bedrockModelId,
+            turns: loop.turns,
+            submission: capturedSubmission,
+          }),
+        );
+        await transitionLabel(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          STATE_LABELS.awaitingTests,
+          HUMAN_NEEDED_LABEL,
+        );
+      }
     } else {
       const forensicUri = await dumpForensicForPark({
         reason: `Test did not push (finalize_kind=${finalizeResult?.kind ?? "no-submit"}; stop=${loop.stopReason})`,

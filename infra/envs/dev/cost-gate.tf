@@ -56,6 +56,9 @@ module "cost_estimator" {
 
   bedrock_model_arns = local.bedrock_invoke_arns["haiku-4-5"]
 
+  forensic_bucket_name = module.forensic_artifacts.bucket_name
+  forensic_bucket_arn  = module.forensic_artifacts.bucket_arn
+
   event_rule_arn = aws_cloudwatch_event_rule.state_cost_estimating_to_estimator.arn
 }
 

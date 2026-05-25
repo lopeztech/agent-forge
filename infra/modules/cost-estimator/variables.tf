@@ -63,6 +63,18 @@ variable "bedrock_model_arns" {
   description = "Bedrock foundation-model ARNs the Lambda may invoke. Scoped to Haiku 4.5 in v1."
 }
 
+variable "forensic_bucket_name" {
+  type        = string
+  description = "S3 bucket name for forensic dumps on the Cost Estimator's two unexpected-park paths (Bedrock 5xx / timeout, post-estimate side-effect failure). Passed as AGENT_FORGE_FORENSIC_BUCKET."
+  default     = ""
+}
+
+variable "forensic_bucket_arn" {
+  type        = string
+  description = "ARN of the forensic-dump S3 bucket. When set, the Lambda gets s3:PutObject scoped to its own role-prefix in the bucket."
+  default     = ""
+}
+
 variable "event_rule_arn" {
   type        = string
   description = "ARN of the EventBridge rule that invokes this Lambda. Used to scope the lambda:InvokeFunction permission."
