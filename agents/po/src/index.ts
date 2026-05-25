@@ -37,10 +37,13 @@ import {
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import {
   addLabels,
+  findOpenPRByHead,
   getIssue,
+  mergePR,
   postComment,
   transitionLabel,
   type GitHubIssue,
+  type MergePRResult,
 } from "../../../shared/github/repo.ts";
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
 import {
@@ -57,6 +60,7 @@ import {
 import { requiredEnv } from "../../../shared/env.ts";
 import { requireBAExpansion } from "../../../shared/state/issue-state.ts";
 import {
+  requireMergerInstallId,
   requireProduct,
   requireWriterInstallId,
   type ProductConfig,
@@ -75,6 +79,10 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+// Optional: only required when product.auto_merge is true. F.2.a wires PO's
+// merge call through the merger App (writer App can't merge against branch
+// protection that requires the merger).
+const MERGER_SECRET_NAME = process.env.AGENT_FORGE_MERGER_SECRET_NAME;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
@@ -276,8 +284,56 @@ function commentPoApprove(args: {
       "gate (CLAUDE.md → Human gates), the PR is **not auto-merged**. A human " +
       "should merge the PR and transition this issue to `state:done`.",
     "",
-    "Slice F.2 will lift this gate (PO calls the merger App's merge endpoint " +
-      "directly on `approve`).",
+    "Flip `products.auto_merge = true` for this product to let PO merge " +
+      "directly on `approve`.",
+  ].filter((s) => s !== "").join("\n");
+}
+
+function commentPoMerged(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  report: POReport;
+  prNumber: number;
+  prUrl: string;
+  sha: string;
+}): string {
+  return [
+    `## PO review: MERGED (Slice F.2, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    "",
+    args.report.summary,
+    "",
+    args.report.details ? "### Reasoning\n\n" + args.report.details + "\n" : "",
+    `Squash-merged ${args.prUrl} (#${args.prNumber}) onto the default branch at \`${args.sha.slice(0, 12)}\`.`,
+    "",
+    `Transitioning \`${STATE_LABELS.awaitingPo}\` → \`${STATE_LABELS.done}\`.`,
+  ].filter((s) => s !== "").join("\n");
+}
+
+function commentPoMergeFailed(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  report: POReport;
+  prNumber?: number;
+  prUrl?: string;
+  reason: string;
+}): string {
+  return [
+    `## PO review: APPROVE but MERGE FAILED (Slice F.2, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    "",
+    args.report.summary,
+    "",
+    args.report.details ? "### Reasoning\n\n" + args.report.details + "\n" : "",
+    args.prNumber !== undefined && args.prUrl
+      ? `Tried to merge ${args.prUrl} (#${args.prNumber}) but the merge call failed:`
+      : "Tried to merge but couldn't find the open PR for this issue's Dev branch:",
+    "",
+    "```",
+    args.reason,
+    "```",
+    "",
+    `Parking at \`${HUMAN_NEEDED_LABEL}\`. A human should investigate (branch protection / out-of-date / conflict / etc.) and merge manually, or revert the PO verdict.`,
   ].filter((s) => s !== "").join("\n");
 }
 
@@ -359,6 +415,105 @@ function commentBudgetCapTripped(args: {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+type AutoMergeResult =
+  | {
+      kind: "merged";
+      prNumber: number;
+      prUrl: string;
+      sha: string;
+    }
+  | {
+      kind: "failed";
+      reason: string;
+      prNumber?: number;
+      prUrl?: string;
+    };
+
+async function tryAutoMerge(args: {
+  ghOpts: { token: string; userAgent: string };
+  product: ProductConfig;
+  report: POReport;
+  model: { bedrockModelId: string };
+  turns: number;
+  runId: string;
+}): Promise<AutoMergeResult> {
+  if (!MERGER_SECRET_NAME) {
+    return {
+      kind: "failed",
+      reason:
+        "products.auto_merge is true but AGENT_FORGE_MERGER_SECRET_NAME isn't " +
+        "set in the PO task environment. Configure infra to pass it through.",
+    };
+  }
+
+  // 1. Find the PR Dev opened (by branch convention).
+  const branchName = `agent-forge/dev/issue-${ISSUE_NUMBER}`;
+  const pr = await findOpenPRByHead(args.ghOpts, REPO, branchName);
+  if (!pr) {
+    return {
+      kind: "failed",
+      reason:
+        `No open PR found for branch \`${branchName}\`. Did Dev's PR already ` +
+        "get merged or closed?",
+    };
+  }
+
+  // 2. Mint a merger-App token. Branch protection on `main` requires review
+  //    from the merger App per CLAUDE.md, so the writer App's token (which
+  //    PO uses everywhere else) cannot actually merge.
+  let mergerInstallId: string;
+  try {
+    mergerInstallId = requireMergerInstallId(args.product);
+  } catch (err) {
+    return {
+      kind: "failed",
+      reason: `products[${PRODUCT_ID}] has no merger_install_id; merger App must be installed on this target repo.`,
+      prNumber: pr.number,
+      prUrl: pr.html_url,
+    };
+  }
+
+  let mergerToken: string;
+  try {
+    const minted = await getInstallationTokenFromSecret(
+      MERGER_SECRET_NAME,
+      mergerInstallId,
+    );
+    mergerToken = minted.token;
+  } catch (err) {
+    return {
+      kind: "failed",
+      reason: `Could not mint merger installation token: ${err instanceof Error ? err.message : String(err)}`,
+      prNumber: pr.number,
+      prUrl: pr.html_url,
+    };
+  }
+
+  // 3. Squash-merge. Commit title = report summary; body = report details.
+  //    Squash so main's history stays a single commit per issue regardless
+  //    of how many Dev + Test + Functional commits the PR carried.
+  const mergerGhOpts = { token: mergerToken, userAgent: USER_AGENT };
+  const result = await mergePR(mergerGhOpts, REPO, pr.number, {
+    mergeMethod: "squash",
+    commitTitle: args.report.summary,
+    commitMessage: args.report.details,
+  });
+  if (result.ok) {
+    return {
+      kind: "merged",
+      prNumber: pr.number,
+      prUrl: pr.html_url,
+      sha: result.sha,
+    };
+  }
+  return {
+    kind: "failed",
+    reason: `HTTP ${result.status}: ${result.body.slice(0, 800)}`,
+    prNumber: pr.number,
+    prUrl: pr.html_url,
+  };
+}
 
 function runIdFromEnv(): string {
   return (
@@ -537,26 +692,85 @@ async function main(): Promise<void> {
     });
 
     if (capturedReport && capturedReport.verdict === "approve") {
-      await postComment(
-        ghOpts,
-        REPO,
-        ISSUE_NUMBER,
-        commentPoApprove({
-          runId,
-          modelId: model.bedrockModelId,
-          turns: loop.turns,
+      // F.2.a: if products.auto_merge is true, mint a merger-App token and
+      // attempt the actual merge. On success → state:done. On failure or
+      // misconfig → park at human-needed with the failure reason in the
+      // comment. If auto_merge is false (default), fall back to F.1
+      // behavior — post a recommend-approve comment and park.
+      if (product.auto_merge === true) {
+        const mergeResult = await tryAutoMerge({
+          ghOpts,
+          product,
           report: capturedReport,
-        }),
-      );
-      // Slice F.1: don't auto-merge. Park at human-needed. F.2 calls the
-      // merger App's merge endpoint and transitions to state:done.
-      await transitionLabel(
-        ghOpts,
-        REPO,
-        ISSUE_NUMBER,
-        STATE_LABELS.awaitingPo,
-        HUMAN_NEEDED_LABEL,
-      );
+          model,
+          turns: loop.turns,
+          runId,
+        });
+        if (mergeResult.kind === "merged") {
+          await postComment(
+            ghOpts,
+            REPO,
+            ISSUE_NUMBER,
+            commentPoMerged({
+              runId,
+              modelId: model.bedrockModelId,
+              turns: loop.turns,
+              report: capturedReport,
+              prNumber: mergeResult.prNumber,
+              prUrl: mergeResult.prUrl,
+              sha: mergeResult.sha,
+            }),
+          );
+          await transitionLabel(
+            ghOpts,
+            REPO,
+            ISSUE_NUMBER,
+            STATE_LABELS.awaitingPo,
+            STATE_LABELS.done,
+          );
+        } else {
+          await postComment(
+            ghOpts,
+            REPO,
+            ISSUE_NUMBER,
+            commentPoMergeFailed({
+              runId,
+              modelId: model.bedrockModelId,
+              turns: loop.turns,
+              report: capturedReport,
+              ...(mergeResult.prNumber !== undefined ? { prNumber: mergeResult.prNumber } : {}),
+              ...(mergeResult.prUrl !== undefined ? { prUrl: mergeResult.prUrl } : {}),
+              reason: mergeResult.reason,
+            }),
+          );
+          await transitionLabel(
+            ghOpts,
+            REPO,
+            ISSUE_NUMBER,
+            STATE_LABELS.awaitingPo,
+            HUMAN_NEEDED_LABEL,
+          );
+        }
+      } else {
+        await postComment(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          commentPoApprove({
+            runId,
+            modelId: model.bedrockModelId,
+            turns: loop.turns,
+            report: capturedReport,
+          }),
+        );
+        await transitionLabel(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          STATE_LABELS.awaitingPo,
+          HUMAN_NEEDED_LABEL,
+        );
+      }
     } else if (capturedReport && capturedReport.verdict === "kickback") {
       await postComment(
         ghOpts,

@@ -310,9 +310,14 @@ module "agent_po" {
 
   products_table_name = module.dynamodb.table_names["products"]
 
+  # F.2.a: PO needs the merger App's secret NAME exposed so it can mint a
+  # merger installation token when products.auto_merge is true. The reads
+  # permission for the merger secret is granted via an inline policy
+  # below (agent-role only grants reads on the single primary secret).
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_MERGER_SECRET_NAME  = module.secrets.merger_secret_name
   }
 
   dynamodb_table_arns = {
@@ -325,6 +330,24 @@ module "agent_po" {
   # PO runs on Opus 4.6 (best-available Opus; 4.7 gated behind AWS Sales
   # on this account).
   bedrock_model_arns = local.bedrock_invoke_arns["opus-4-6"]
+}
+
+# F.2.a: grant PO's task role reads on the merger secret too. The base
+# agent-role module grants only the primary (writer) secret; PO is the one
+# role that needs both. Inline here rather than widening the module shape
+# since PO is the only consumer for the foreseeable future.
+data "aws_iam_policy_document" "agent_po_merger_secret" {
+  statement {
+    sid       = "ReadMergerSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = [module.secrets.merger_secret_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "agent_po_merger_secret" {
+  name   = "${var.name_prefix}-po-merger-secret"
+  role   = module.agent_po.task_role_name
+  policy = data.aws_iam_policy_document.agent_po_merger_secret.json
 }
 
 # ------------------------------------------------------------------------------

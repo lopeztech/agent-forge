@@ -50,6 +50,13 @@ export type ProductConfig = {
   // at human-needed before the next model call. Default 12 USD per CLAUDE.md
   // → Cost model.
   per_issue_budget_cap_usd?: number;
+  // When true, PO autonomously merges the PR on verdict=approve via the
+  // merger App. When false (default), PO posts a "recommend approve"
+  // comment and parks at human-needed for a human to merge. Per CLAUDE.md
+  // → Human gates ("first 30 days of a new target repo, the PO step is a
+  // Slack approval gate before merge, not autonomous merge"). Flip to true
+  // per-product after observed merge accuracy is acceptable.
+  auto_merge?: boolean;
   updated_at?: string;
 };
 
