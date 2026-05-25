@@ -57,6 +57,7 @@ import {
   type MergePRResult,
 } from "../../../shared/github/repo.ts";
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
+import { hashSpecTree } from "../../../shared/github/spec-hashes.ts";
 import {
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
@@ -70,7 +71,10 @@ import {
   type ToolDefinition,
 } from "../../../shared/models.ts";
 import { requiredEnv } from "../../../shared/env.ts";
-import { requireBAExpansion } from "../../../shared/state/issue-state.ts";
+import {
+  putSpecHashesAtMerge,
+  requireBAExpansion,
+} from "../../../shared/state/issue-state.ts";
 import {
   requireMergerInstallId,
   requireProduct,
@@ -805,6 +809,35 @@ async function main(): Promise<void> {
     });
 
     if (capturedReport && capturedReport.verdict === "approve") {
+      // D2: snapshot per-file spec hashes onto issue_state so the weekly
+      // drift audit has a baseline to compare against. Done for both the
+      // auto-merge and recommend-only paths — a human-merged issue
+      // benefits from drift detection just as much as an auto-merged one.
+      // Best-effort: a write failure here logs but doesn't block the
+      // merge/recommend; drift audit just skips issues with no baseline.
+      try {
+        const hashes = hashSpecTree(spec);
+        if (Object.keys(hashes).length > 0) {
+          await putSpecHashesAtMerge({
+            tableName: ISSUE_STATE_TABLE,
+            productId: PRODUCT_ID,
+            issueNumber: ISSUE_NUMBER,
+            hashes: {
+              hashed_at: new Date().toISOString(),
+              hashes,
+            },
+          });
+          log({ msg: "wrote spec_hashes_at_merge", files: Object.keys(hashes).length });
+        } else {
+          log({ msg: "spec is empty; skipping spec_hashes_at_merge" });
+        }
+      } catch (err) {
+        log({
+          msg: "putSpecHashesAtMerge failed (non-fatal)",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
       // F.2.a: if products.auto_merge is true, mint a merger-App token and
       // attempt the actual merge. On success → state:done. On failure or
       // misconfig → park at human-needed with the failure reason in the

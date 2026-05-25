@@ -8,6 +8,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 
@@ -78,6 +79,19 @@ export type ForensicPointer = {
   created_at: string;
 };
 
+// Phase D2: per-file SHA-256 of the product's spec at the moment PO
+// approved this issue. Drift audit compares against current spec to
+// detect "the spec changed under us since this issue shipped".
+//
+// Keys are the in-repo paths used by readSpecTree (e.g. "spec/README.md",
+// "spec/roles.md"). Values are hex SHA-256 of the file content as
+// returned by GitHub at PO's read time.
+export type SpecHashesAtMerge = {
+  hashed_at: string;
+  // Map of path → hex SHA-256.
+  hashes: Record<string, string>;
+};
+
 export type IssueState = {
   product_id: string;
   issue_id: string;
@@ -88,6 +102,7 @@ export type IssueState = {
   last_run_id?: string;
   last_state?: string;
   forensic_reports?: ForensicPointer[];
+  spec_hashes_at_merge?: SpecHashesAtMerge;
   updated_at?: string;
 };
 
@@ -230,6 +245,75 @@ export async function incrementKickback(
     throw new Error("DynamoDB did not return numeric kickback_count");
   }
   return next;
+}
+
+export type ListDoneIssuesWithSpecHashesOpts = {
+  tableName: string;
+  productId: string;
+  // ISO timestamp. Only issues whose updated_at is at or after this cut-off
+  // are returned. Default: 90 days ago.
+  sinceIso?: string;
+  // Cap on returned issues. The drift audit only needs ~5, so we paginate
+  // until we have this many or the partition is exhausted.
+  limit?: number;
+};
+
+// Query the product's issue_state partition for issues that look like a
+// drift-audit candidate: last_state="done" AND spec_hashes_at_merge is
+// present AND updated_at >= sinceIso. Returns at most `limit` matches.
+//
+// FilterExpression keeps the scan tight per partition; for v1 with low N
+// per product this is fine, and the drift audit only runs weekly.
+export async function listDoneIssuesWithSpecHashes(
+  opts: ListDoneIssuesWithSpecHashesOpts,
+): Promise<IssueState[]> {
+  const limit = opts.limit ?? 5;
+  const sinceIso =
+    opts.sinceIso ??
+    new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+  const out: IssueState[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb().send(
+      new QueryCommand({
+        TableName: opts.tableName,
+        KeyConditionExpression: "product_id = :p",
+        FilterExpression:
+          "last_state = :done " +
+          "AND attribute_exists(spec_hashes_at_merge) " +
+          "AND updated_at >= :since",
+        ExpressionAttributeValues: {
+          ":p": opts.productId,
+          ":done": "state:done",
+          ":since": sinceIso,
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const item of r.Items ?? []) {
+      out.push(item as IssueState);
+      if (out.length >= limit) return out;
+    }
+    exclusiveStartKey = r.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+  return out;
+}
+
+export type PutSpecHashesAtMergeOpts = GetIssueStateOpts & {
+  hashes: SpecHashesAtMerge;
+  updatedAt?: Date;
+};
+
+// Idempotent: overwrites prior spec_hashes_at_merge. Called from PO when
+// an approve verdict resolves (whether via auto_merge or recommend-only),
+// so the next drift-audit run has a baseline to compare against.
+export async function putSpecHashesAtMerge(
+  opts: PutSpecHashesAtMergeOpts,
+): Promise<void> {
+  await updateFields(opts.tableName, opts, {
+    spec_hashes_at_merge: opts.hashes,
+    updated_at: iso(opts.updatedAt),
+  });
 }
 
 export type AppendForensicReportOpts = GetIssueStateOpts & {

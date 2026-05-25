@@ -8,6 +8,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
+  ScanCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 const REGION = process.env.AWS_REGION ?? "eu-west-1";
@@ -114,6 +115,39 @@ export async function requireProduct(
     throw new Error(`No products row for product_id=${opts.productId}`);
   }
   return product;
+}
+
+export type ListProductsOpts = {
+  tableName: string;
+  // When true (default), skip the org-global row at product_id="*".
+  excludeGlobal?: boolean;
+};
+
+// Scans the products table. Used by org-wide jobs (drift audit,
+// scheduled rollups) that need to iterate every target product. Small
+// table in practice (~1-10 rows in v1), so Scan is acceptable; revisit
+// when products grow past ~100.
+export async function listProducts(
+  opts: ListProductsOpts,
+): Promise<ProductConfig[]> {
+  const excludeGlobal = opts.excludeGlobal !== false;
+  const products: ProductConfig[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb().send(
+      new ScanCommand({
+        TableName: opts.tableName,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const item of r.Items ?? []) {
+      const p = item as ProductConfig;
+      if (excludeGlobal && p.product_id === "*") continue;
+      products.push(p);
+    }
+    exclusiveStartKey = r.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+  return products;
 }
 
 export type ResolveProductByRepoOpts = {
