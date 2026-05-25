@@ -26,6 +26,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@types/aws-lambda": "^8.10.161",
     "@types/node": "^22.10.0",
     "esbuild": "^0.28.0",
     "typescript": "^5.7.0"

@@ -92,6 +92,19 @@ export async function postComment(
   return (await r.json()) as { id: number; html_url: string };
 }
 
+export async function createIssue(
+  opts: RequestOptions,
+  repo: string,
+  args: { title: string; body: string; labels?: string[] },
+): Promise<{ number: number; html_url: string }> {
+  const r = await ghOrThrow(opts, "POST", `/repos/${repo}/issues`, {
+    title: args.title,
+    body: args.body,
+    ...(args.labels && args.labels.length > 0 ? { labels: args.labels } : {}),
+  });
+  return (await r.json()) as { number: number; html_url: string };
+}
+
 export async function getIssue(
   opts: RequestOptions,
   repo: string,
