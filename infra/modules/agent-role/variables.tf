@@ -92,3 +92,9 @@ variable "extra_environment" {
   description = "Additional static environment variables to inject into the agent container."
   default     = {}
 }
+
+variable "forensic_bucket_arn" {
+  type        = string
+  description = "Optional. When set, the task role gets s3:PutObject on <bucket>/<role>/* for dumping forensic reports on park. Empty string disables the grant."
+  default     = ""
+}

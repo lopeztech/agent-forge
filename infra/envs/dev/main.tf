@@ -4,6 +4,17 @@ module "dynamodb" {
   name_prefix = var.name_prefix
 }
 
+# Forensic-artifacts bucket. Every agent role PutObjects here when an issue
+# parks at human-needed so debugging a stuck issue doesn't require trawling
+# CloudWatch. See infra/modules/forensic-artifacts.
+module "forensic_artifacts" {
+  source = "../../modules/forensic-artifacts"
+
+  # AWS account ID baked in for uniqueness; the bucket name must be globally
+  # unique across all of S3.
+  bucket_name = "${var.name_prefix}-forensic-076124126225"
+}
+
 module "secrets" {
   source = "../../modules/secrets"
 

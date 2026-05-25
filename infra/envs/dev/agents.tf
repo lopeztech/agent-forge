@@ -97,6 +97,7 @@ module "agent_ba" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
   # BA needs read on products (issue trigger lookup) and write on
@@ -108,6 +109,8 @@ module "agent_ba" {
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
     area_locks    = module.dynamodb.table_arns["area_locks"]
   }
+
+  forensic_bucket_arn = module.forensic_artifacts.bucket_arn
 
   # BA-real (Slice B-followup): expand issues with Sonnet 4.6.
   # Profile + 6 underlying foundation-model ARNs (EU geographic CRIS).
@@ -138,6 +141,7 @@ module "agent_dev" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_AREA_LOCKS_TABLE    = module.dynamodb.table_names["area_locks"]
+    AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
   # Dev needs read on products + the same write surface as BA, plus area_locks
@@ -150,6 +154,8 @@ module "agent_dev" {
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
     area_locks    = module.dynamodb.table_arns["area_locks"]
   }
+
+  forensic_bucket_arn = module.forensic_artifacts.bucket_arn
 
   # Complexity-driven tier routing (tierForDev): Haiku for trivial issues,
   # Sonnet for small/medium (default), Opus for large + the attempt-3
@@ -203,6 +209,7 @@ module "agent_test" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
   # Test reads products + issue_state (BA expansion + budget pre-check),
@@ -213,6 +220,8 @@ module "agent_test" {
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
   }
+
+  forensic_bucket_arn = module.forensic_artifacts.bucket_arn
 
   bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
 }
@@ -241,6 +250,7 @@ module "agent_functional" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
   dynamodb_table_arns = {
@@ -249,6 +259,8 @@ module "agent_functional" {
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
   }
+
+  forensic_bucket_arn = module.forensic_artifacts.bucket_arn
 
   bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
 }
@@ -277,6 +289,7 @@ module "agent_security" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
   dynamodb_table_arns = {
@@ -285,6 +298,8 @@ module "agent_security" {
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
   }
+
+  forensic_bucket_arn = module.forensic_artifacts.bucket_arn
 
   bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
 }
@@ -318,6 +333,7 @@ module "agent_po" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_MERGER_SECRET_NAME  = module.secrets.merger_secret_name
+    AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
   dynamodb_table_arns = {
@@ -326,6 +342,8 @@ module "agent_po" {
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
   }
+
+  forensic_bucket_arn = module.forensic_artifacts.bucket_arn
 
   # PO runs on Opus 4.6 (best-available Opus; 4.7 gated behind AWS Sales
   # on this account).
