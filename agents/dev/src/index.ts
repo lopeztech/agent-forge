@@ -35,7 +35,7 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
-import { writeForensicReport } from "../../../shared/forensic/report.ts";
+import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -67,10 +67,7 @@ import {
   type ToolDefinition,
 } from "../../../shared/models.ts";
 import { requiredEnv } from "../../../shared/env.ts";
-import {
-  appendForensicReport,
-  requireBAExpansion,
-} from "../../../shared/state/issue-state.ts";
+import { requireBAExpansion } from "../../../shared/state/issue-state.ts";
 import {
   requireProduct,
   requireWriterInstallId,
@@ -142,73 +139,14 @@ function log(obj: Record<string, unknown>): void {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Forensic dump on park. Captures the tail of the agent loop's conversation
-// + a structured "why we parked" record to S3, then appends a pointer to
-// issue_state.forensic_reports[]. Best-effort — if either side fails we
-// log but don't fail the run (the issue is parked either way; we just
-// lose the artefact). Returns the s3:// URI on success so the caller can
-// link it from the issue comment.
-async function dumpForensicForPark(args: {
-  reason: string;
-  stopReason?: string;
-  turns?: number;
-  toolCallCounts?: Record<string, number>;
-  // Pass loop.messages; we slice the tail. Empty when the park happened
-  // before the loop ran (e.g. missing BA expansion).
-  loopMessages?: ReadonlyArray<import("../../../shared/models.ts").ChatMessage>;
-  costUsd?: number;
-  extra?: Record<string, unknown>;
-  runId: string;
-}): Promise<string | undefined> {
-  if (!FORENSIC_BUCKET) {
-    log({ msg: "forensic bucket not configured; skipping dump" });
-    return undefined;
-  }
-  try {
-    const snapshot: import("../../../shared/forensic/report.ts").ForensicSnapshot = {
-      reason: args.reason,
-    };
-    if (args.stopReason !== undefined) snapshot.stop_reason = args.stopReason;
-    if (args.turns !== undefined) snapshot.turns = args.turns;
-    if (args.toolCallCounts !== undefined) snapshot.tool_call_counts = args.toolCallCounts;
-    if (args.loopMessages !== undefined) {
-      // Last 6 messages: ~3 user/assistant turns of context. Plenty for
-      // a human to see what the agent was doing right before parking
-      // without blowing the S3 object size up.
-      snapshot.conversation_tail = args.loopMessages.slice(-6);
-    }
-    if (args.costUsd !== undefined) snapshot.cost_usd = args.costUsd;
-    if (args.extra !== undefined) snapshot.extra = args.extra;
-    const written = await writeForensicReport({
-      bucket: FORENSIC_BUCKET,
-      productId: PRODUCT_ID,
-      issueNumber: ISSUE_NUMBER,
-      role: ROLE,
-      runId: args.runId,
-      snapshot,
-    });
-    await appendForensicReport({
-      tableName: ISSUE_STATE_TABLE,
-      productId: PRODUCT_ID,
-      issueNumber: ISSUE_NUMBER,
-      report: {
-        role: ROLE,
-        run_id: args.runId,
-        artifact_uri: written.uri,
-        reason: args.reason,
-        created_at: new Date().toISOString(),
-      },
-    });
-    log({ msg: "wrote forensic report", uri: written.uri });
-    return written.uri;
-  } catch (err) {
-    log({
-      msg: "forensic dump failed (non-fatal)",
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return undefined;
-  }
-}
+const dumpForensicForPark = makeParkDumper({
+  bucket: FORENSIC_BUCKET,
+  issueStateTable: ISSUE_STATE_TABLE,
+  productId: PRODUCT_ID,
+  issueNumber: ISSUE_NUMBER,
+  role: ROLE,
+  log,
+});
 
 function runIdFromEnv(): string {
   return (
@@ -598,7 +536,7 @@ function commentLoopRunaway(args: {
   ];
   if (args.forensicUri) {
     lines.push("");
-    lines.push(`<sub>Forensic dump: \`${args.forensicUri}\` (last 6 conversation turns + tool counts). \`aws s3 cp <uri> -\` to inspect.</sub>`);
+    lines.push(forensicFooter(args.forensicUri));
   }
   return lines.join("\n");
 }
@@ -669,7 +607,7 @@ function commentFinalizeFailed(args: {
   lines.push(`Parking at \`${HUMAN_NEEDED_LABEL}\`.`);
   if (args.forensicUri) {
     lines.push("");
-    lines.push(`<sub>Forensic dump: \`${args.forensicUri}\` (last 6 conversation turns + tool counts + finalize state). \`aws s3 cp <uri> -\` to inspect.</sub>`);
+    lines.push(forensicFooter(args.forensicUri));
   }
   return lines.join("\n");
 }

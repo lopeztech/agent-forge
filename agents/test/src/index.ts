@@ -26,6 +26,7 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
+import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -80,6 +81,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
@@ -104,6 +106,15 @@ function log(obj: Record<string, unknown>): void {
     ...obj,
   }));
 }
+
+const dumpForensicForPark = makeParkDumper({
+  bucket: FORENSIC_BUCKET,
+  issueStateTable: ISSUE_STATE_TABLE,
+  productId: PRODUCT_ID,
+  issueNumber: ISSUE_NUMBER,
+  role: ROLE,
+  log,
+});
 
 // ---------------------------------------------------------------------------
 // System prompt + tool
@@ -272,6 +283,7 @@ function commentTestFailed(args: {
   turns: number;
   stopReason: string;
   finalize: FinalizeTestResult | undefined;
+  forensicUri?: string;
 }): string {
   const lines = [
     `## Test did not push (Slice C, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"}, stop=\`${args.stopReason}\`)`,
@@ -295,6 +307,10 @@ function commentTestFailed(args: {
   }
   lines.push("");
   lines.push(`Parking at \`${HUMAN_NEEDED_LABEL}\`.`);
+  if (args.forensicUri) {
+    lines.push("");
+    lines.push(forensicFooter(args.forensicUri));
+  }
   return lines.join("\n");
 }
 
@@ -603,6 +619,19 @@ async function main(): Promise<void> {
         STATE_LABELS.awaitingFunctional,
       );
     } else {
+      const forensicUri = await dumpForensicForPark({
+        reason: `Test did not push (finalize_kind=${finalizeResult?.kind ?? "no-submit"}; stop=${loop.stopReason})`,
+        stopReason: loop.stopReason,
+        turns: loop.turns,
+        toolCallCounts,
+        loopMessages: loop.messages,
+        costUsd: loop.costUsd,
+        extra: {
+          finalize: finalizeResult,
+          submission: capturedSubmission,
+        },
+        runId,
+      });
       await postComment(
         ghOpts,
         REPO,
@@ -613,6 +642,7 @@ async function main(): Promise<void> {
           turns: loop.turns,
           stopReason: loop.stopReason,
           finalize: finalizeResult,
+          ...(forensicUri ? { forensicUri } : {}),
         }),
       );
       await transitionLabel(
