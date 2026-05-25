@@ -75,7 +75,8 @@ module "ecr_po" {
 }
 
 # ------------------------------------------------------------------------------
-# BA agent role (Slice A stub — no Bedrock yet)
+# BA agent role — expands issues with Sonnet, writes issue_state.ba_expansion,
+# applies area labels, and hands off to cost estimation.
 # ------------------------------------------------------------------------------
 
 module "agent_ba" {
@@ -98,6 +99,7 @@ module "agent_ba" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
+    AGENT_FORGE_TEAM_MEMORY_TABLE   = module.dynamodb.table_names["team_memory"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -114,13 +116,13 @@ module "agent_ba" {
 
   forensic_bucket_arn = module.forensic_artifacts.bucket_arn
 
-  # BA-real (Slice B-followup): expand issues with Sonnet 4.6.
   # Profile + 6 underlying foundation-model ARNs (EU geographic CRIS).
   bedrock_model_arns = local.bedrock_invoke_arns["sonnet-4-6"]
 }
 
 # ------------------------------------------------------------------------------
-# Dev agent role (Slice A — orchestration + area-lock proof, no Bedrock yet)
+# Dev agent role — acquires area locks, edits a target-repo clone, pushes the
+# PR branch, and opens the PR.
 # ------------------------------------------------------------------------------
 
 module "agent_dev" {
@@ -143,6 +145,7 @@ module "agent_dev" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
+    AGENT_FORGE_TEAM_MEMORY_TABLE   = module.dynamodb.table_names["team_memory"]
     AGENT_FORGE_AREA_LOCKS_TABLE    = module.dynamodb.table_names["area_locks"]
     AGENT_FORGE_LOCK_WAITERS_TABLE  = module.dynamodb.table_names["lock_waiters"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
@@ -224,6 +227,7 @@ module "agent_test" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
+    AGENT_FORGE_TEAM_MEMORY_TABLE   = module.dynamodb.table_names["team_memory"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -243,8 +247,8 @@ module "agent_test" {
 }
 
 # ------------------------------------------------------------------------------
-# Functional agent role (Slice D.1 — Sonnet 4.6, no area locks, read-only on
-# the PR branch; bash to run smoke/test scripts)
+# Functional agent role — Sonnet 4.6, no area locks, PR-branch verification
+# with read/bash tools, and kickback to Dev on failed verification.
 # ------------------------------------------------------------------------------
 
 module "agent_functional" {
@@ -267,6 +271,7 @@ module "agent_functional" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
+    AGENT_FORGE_TEAM_MEMORY_TABLE   = module.dynamodb.table_names["team_memory"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -284,8 +289,8 @@ module "agent_functional" {
 }
 
 # ------------------------------------------------------------------------------
-# Security agent role (Slice E.1 — Sonnet 4.6, read-only on PR branch, bash
-# for npm audit and ad-hoc inspection)
+# Security agent role — Sonnet 4.6, PR-branch security review with scanner
+# commands, and kickback to Dev on blocking findings.
 # ------------------------------------------------------------------------------
 
 module "agent_security" {
@@ -308,6 +313,7 @@ module "agent_security" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
+    AGENT_FORGE_TEAM_MEMORY_TABLE   = module.dynamodb.table_names["team_memory"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -325,8 +331,8 @@ module "agent_security" {
 }
 
 # ------------------------------------------------------------------------------
-# PO agent role (Slice F.1 — Opus 4.6 review-only; doesn't merge, just
-# posts a recommend-merge / kickback comment + parks at human-needed)
+# PO agent role — Opus 4.6 gate. Can auto-merge through the merger App when
+# products.auto_merge=true; otherwise recommends merge and parks for a human.
 # ------------------------------------------------------------------------------
 
 module "agent_po" {
@@ -353,6 +359,7 @@ module "agent_po" {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
     AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
+    AGENT_FORGE_TEAM_MEMORY_TABLE   = module.dynamodb.table_names["team_memory"]
     AGENT_FORGE_MERGER_SECRET_NAME  = module.secrets.merger_secret_name
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }

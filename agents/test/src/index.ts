@@ -34,6 +34,12 @@ import {
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
+  RECORD_LESSON_TOOL,
+  buildMemoryBlock,
+  dispatchRecordLesson,
+} from "../../../shared/agent/memory-tool.ts";
+import { getLessons } from "../../../shared/state/team-memory.ts";
+import {
   buildReadToolDefinitions,
   dispatchReadTool,
 } from "../../../shared/agent/read-tools.ts";
@@ -88,6 +94,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const TEAM_MEMORY_TABLE = requiredEnv("AGENT_FORGE_TEAM_MEMORY_TABLE");
 const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
@@ -235,9 +242,18 @@ const SUBMIT_TESTS_DONE_TOOL: ToolDefinition = {
   },
 };
 
-function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
+function buildSystemBlocks(
+  spec: SpecReadResult,
+  memoryBlock: string,
+): SystemBlock[] {
+  const memoryBlocks: SystemBlock[] = memoryBlock
+    ? [{ type: "text", text: memoryBlock, cache_control: { type: "ephemeral" } }]
+    : [];
   if (spec.missing || spec.files.length === 0) {
-    return [{ type: "text", text: BASE_SYSTEM_PROMPT }];
+    return [
+      { type: "text", text: BASE_SYSTEM_PROMPT },
+      ...memoryBlocks,
+    ];
   }
   const specBlocks = spec.files
     .map((f) => `<file path="${f.path}">\n${f.content.trim()}\n</file>`)
@@ -258,6 +274,7 @@ function buildSystemBlocks(spec: SpecReadResult): SystemBlock[] {
   return [
     { type: "text", text: BASE_SYSTEM_PROMPT, cache_control: { type: "ephemeral" } },
     { type: "text", text: specText, cache_control: { type: "ephemeral" } },
+    ...memoryBlocks,
   ];
 }
 
@@ -638,6 +655,14 @@ async function main(): Promise<void> {
     const testCommand = await resolveTestCommand(workdir.path, product.test_command);
     log({ msg: "resolved test_command", command: testCommand ?? "(none)" });
 
+    const lessons = await getLessons({
+      tableName: TEAM_MEMORY_TABLE,
+      productId: PRODUCT_ID,
+      role: ROLE,
+    });
+    const memoryBlock = buildMemoryBlock(ROLE, lessons);
+    log({ msg: "loaded team memory", lessons: lessons.length });
+
     const model = getModelByTier("sonnet-4-6");
     const userMessage = buildUserMessage({
       issue, baExpansion, branchName, testCommand,
@@ -678,6 +703,16 @@ async function main(): Promise<void> {
         finalizeResult = f;
         return handleFinalizeResult(call.id, f);
       }
+      if (call.name === RECORD_LESSON_TOOL.name) {
+        const r = await dispatchRecordLesson({
+          tableName: TEAM_MEMORY_TABLE,
+          productId: PRODUCT_ID,
+          role: ROLE,
+          runId,
+          rawInput: call.input,
+        });
+        return wrapToolResult(call.id, r);
+      }
       const read = await dispatchReadTool(wd, call.name, call.input);
       if (read) return wrapToolResult(call.id, read);
       const write = await dispatchWriteTool(wd, call.name, call.input);
@@ -686,7 +721,7 @@ async function main(): Promise<void> {
         tool_use_id: call.id,
         content:
           `Unknown tool: ${call.name}. Call one of read_file, list_directory, ` +
-          "grep, write_file, bash, or submit_tests_done.",
+          "grep, write_file, bash, record_lesson, or submit_tests_done.",
         is_error: true,
       };
     };
@@ -694,11 +729,12 @@ async function main(): Promise<void> {
     const tools = [
       ...buildReadToolDefinitions(),
       ...buildWriteToolDefinitions(),
+      RECORD_LESSON_TOOL,
       SUBMIT_TESTS_DONE_TOOL,
     ];
     const loop = await runAgentLoop({
       model,
-      system: buildSystemBlocks(spec),
+      system: buildSystemBlocks(spec, memoryBlock),
       initialMessages: [{ role: "user", content: userMessage }],
       tools,
       executeTool,

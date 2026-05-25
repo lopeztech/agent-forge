@@ -32,6 +32,8 @@ import {
   type BudgetTrip,
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
+import { buildMemoryBlock } from "../../../shared/agent/memory-tool.ts";
+import { getLessons } from "../../../shared/state/team-memory.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile, type AreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -81,6 +83,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const TEAM_MEMORY_TABLE = requiredEnv("AGENT_FORGE_TEAM_MEMORY_TABLE");
 const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
@@ -292,13 +295,18 @@ free-form text response.
 function buildSystemBlocks(
   spec: SpecReadResult,
   areas: AreasFile,
+  memoryBlock: string,
 ): SystemBlock[] {
   const areaBlock = buildAreaBlockText(areas);
+  const memoryBlocks: SystemBlock[] = memoryBlock
+    ? [{ type: "text", text: memoryBlock, cache_control: { type: "ephemeral" } }]
+    : [];
 
   if (spec.missing || spec.files.length === 0) {
     return [
       { type: "text", text: BASE_SYSTEM_PROMPT },
       { type: "text", text: areaBlock },
+      ...memoryBlocks,
     ];
   }
 
@@ -342,6 +350,7 @@ function buildSystemBlocks(
       text: areaBlock,
       cache_control: { type: "ephemeral" },
     },
+    ...memoryBlocks,
   ];
 }
 
@@ -371,6 +380,7 @@ async function runBA(
   issue: GitHubIssue,
   spec: SpecReadResult,
   areas: AreasFile,
+  memoryBlock: string,
 ): Promise<{
   expansion: BAExpansion;
   model: ReturnType<typeof getModelByTier>;
@@ -383,7 +393,7 @@ async function runBA(
     `Issue #${issue.number}: ${issue.title}\n\n---\n\n${issue.body ?? "(no body)"}`;
 
   const result = await model.invoke({
-    system: buildSystemBlocks(spec, areas),
+    system: buildSystemBlocks(spec, areas, memoryBlock),
     messages: [{ role: "user", content: userMessage }],
     maxTokens: 2048,
     tools: [buildSubmitExpansionTool(areas.areaNames)],
@@ -688,12 +698,23 @@ async function main(): Promise<void> {
     area_names: areasResult.areas.areaNames,
   });
 
+  // Team memory: load lessons accumulated by prior BA runs on this product
+  // (plus org-global BA lessons). usage_count bumps fire-and-forget per
+  // returned lesson. Empty when no prior runs have recorded anything.
+  const lessons = await getLessons({
+    tableName: TEAM_MEMORY_TABLE,
+    productId: PRODUCT_ID,
+    role: ROLE,
+  });
+  const memoryBlock = buildMemoryBlock(ROLE, lessons);
+  log({ msg: "loaded team memory", lessons: lessons.length });
+
   const {
     expansion,
     model,
     costUsd: baCostUsd,
     usage,
-  } = await runBA(issue, spec, areasResult.areas);
+  } = await runBA(issue, spec, areasResult.areas, memoryBlock);
 
   const conflicted = expansion.spec_conflict.detected;
   // Spec-conflict takes precedence: we don't apply area labels for a parked
