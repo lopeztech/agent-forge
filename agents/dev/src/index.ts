@@ -35,6 +35,7 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
+import { writeForensicReport } from "../../../shared/forensic/report.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -66,7 +67,10 @@ import {
   type ToolDefinition,
 } from "../../../shared/models.ts";
 import { requiredEnv } from "../../../shared/env.ts";
-import { requireBAExpansion } from "../../../shared/state/issue-state.ts";
+import {
+  appendForensicReport,
+  requireBAExpansion,
+} from "../../../shared/state/issue-state.ts";
 import {
   requireProduct,
   requireWriterInstallId,
@@ -96,6 +100,7 @@ const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
 const AREA_LOCKS_TABLE = requiredEnv("AGENT_FORGE_AREA_LOCKS_TABLE");
+const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
@@ -136,6 +141,74 @@ function log(obj: Record<string, unknown>): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// Forensic dump on park. Captures the tail of the agent loop's conversation
+// + a structured "why we parked" record to S3, then appends a pointer to
+// issue_state.forensic_reports[]. Best-effort — if either side fails we
+// log but don't fail the run (the issue is parked either way; we just
+// lose the artefact). Returns the s3:// URI on success so the caller can
+// link it from the issue comment.
+async function dumpForensicForPark(args: {
+  reason: string;
+  stopReason?: string;
+  turns?: number;
+  toolCallCounts?: Record<string, number>;
+  // Pass loop.messages; we slice the tail. Empty when the park happened
+  // before the loop ran (e.g. missing BA expansion).
+  loopMessages?: ReadonlyArray<import("../../../shared/models.ts").ChatMessage>;
+  costUsd?: number;
+  extra?: Record<string, unknown>;
+  runId: string;
+}): Promise<string | undefined> {
+  if (!FORENSIC_BUCKET) {
+    log({ msg: "forensic bucket not configured; skipping dump" });
+    return undefined;
+  }
+  try {
+    const snapshot: import("../../../shared/forensic/report.ts").ForensicSnapshot = {
+      reason: args.reason,
+    };
+    if (args.stopReason !== undefined) snapshot.stop_reason = args.stopReason;
+    if (args.turns !== undefined) snapshot.turns = args.turns;
+    if (args.toolCallCounts !== undefined) snapshot.tool_call_counts = args.toolCallCounts;
+    if (args.loopMessages !== undefined) {
+      // Last 6 messages: ~3 user/assistant turns of context. Plenty for
+      // a human to see what the agent was doing right before parking
+      // without blowing the S3 object size up.
+      snapshot.conversation_tail = args.loopMessages.slice(-6);
+    }
+    if (args.costUsd !== undefined) snapshot.cost_usd = args.costUsd;
+    if (args.extra !== undefined) snapshot.extra = args.extra;
+    const written = await writeForensicReport({
+      bucket: FORENSIC_BUCKET,
+      productId: PRODUCT_ID,
+      issueNumber: ISSUE_NUMBER,
+      role: ROLE,
+      runId: args.runId,
+      snapshot,
+    });
+    await appendForensicReport({
+      tableName: ISSUE_STATE_TABLE,
+      productId: PRODUCT_ID,
+      issueNumber: ISSUE_NUMBER,
+      report: {
+        role: ROLE,
+        run_id: args.runId,
+        artifact_uri: written.uri,
+        reason: args.reason,
+        created_at: new Date().toISOString(),
+      },
+    });
+    log({ msg: "wrote forensic report", uri: written.uri });
+    return written.uri;
+  } catch (err) {
+    log({
+      msg: "forensic dump failed (non-fatal)",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
 
 function runIdFromEnv(): string {
   return (
@@ -510,8 +583,9 @@ function commentLoopRunaway(args: {
   turns: number;
   costUsd: number;
   attempt: IterAttempt;
+  forensicUri?: string;
 }): string {
-  return [
+  const lines = [
     `## Dev ran out of turns (run \`${args.runId}\`, ${args.modelId}, attempt ${args.attempt})`,
     "",
     `The Sonnet/Haiku/Opus loop hit the ${args.turns}-turn ceiling without ` +
@@ -521,7 +595,12 @@ function commentLoopRunaway(args: {
     `Spend on this attempt: **$${args.costUsd.toFixed(4)}**.`,
     "",
     `Parking at \`${HUMAN_NEEDED_LABEL}\`.`,
-  ].join("\n");
+  ];
+  if (args.forensicUri) {
+    lines.push("");
+    lines.push(`<sub>Forensic dump: \`${args.forensicUri}\` (last 6 conversation turns + tool counts). \`aws s3 cp <uri> -\` to inspect.</sub>`);
+  }
+  return lines.join("\n");
 }
 
 function commentPRShipped(args: {
@@ -552,6 +631,7 @@ function commentFinalizeFailed(args: {
   stopReason: string;
   lockedAreaIds: string[];
   finalize: FinalizeResult | undefined;
+  forensicUri?: string;
 }): string {
   const lockedLine = `Locked areas: ${args.lockedAreaIds.map((a) => `\`${a}\``).join(", ")}`;
   const lines = [
@@ -587,6 +667,10 @@ function commentFinalizeFailed(args: {
   }
   lines.push("");
   lines.push(`Parking at \`${HUMAN_NEEDED_LABEL}\`.`);
+  if (args.forensicUri) {
+    lines.push("");
+    lines.push(`<sub>Forensic dump: \`${args.forensicUri}\` (last 6 conversation turns + tool counts + finalize state). \`aws s3 cp <uri> -\` to inspect.</sub>`);
+  }
   return lines.join("\n");
 }
 
@@ -984,6 +1068,16 @@ async function main(): Promise<void> {
     } else if (loop.stopReason === "max_turns" && finalizeResult === undefined) {
       // Runaway loop: agent never reached submit_done. Distinct comment so
       // humans can tell this apart from "submit_done failed validation".
+      const forensicUri = await dumpForensicForPark({
+        reason: `Loop hit max_turns=${AGENT_MAX_TURNS} without calling submit_done`,
+        stopReason: loop.stopReason,
+        turns: loop.turns,
+        toolCallCounts,
+        loopMessages: loop.messages,
+        costUsd: loop.costUsd,
+        extra: { attempt },
+        runId,
+      });
       await postComment(
         ghOpts,
         REPO,
@@ -994,6 +1088,7 @@ async function main(): Promise<void> {
           turns: loop.turns,
           costUsd: loop.costUsd,
           attempt,
+          ...(forensicUri ? { forensicUri } : {}),
         }),
       );
       await transitionLabel(
@@ -1004,6 +1099,20 @@ async function main(): Promise<void> {
         HUMAN_NEEDED_LABEL,
       );
     } else {
+      const forensicUri = await dumpForensicForPark({
+        reason: `submit_done failed (finalize_kind=${finalizeResult?.kind ?? "no-submit"}; stop=${loop.stopReason})`,
+        stopReason: loop.stopReason,
+        turns: loop.turns,
+        toolCallCounts,
+        loopMessages: loop.messages,
+        costUsd: loop.costUsd,
+        extra: {
+          attempt,
+          finalize: finalizeResult,
+          submission: capturedSubmission,
+        },
+        runId,
+      });
       await postComment(
         ghOpts,
         REPO,
@@ -1015,6 +1124,7 @@ async function main(): Promise<void> {
           stopReason: loop.stopReason,
           lockedAreaIds: result.lease.areaIds,
           finalize: finalizeResult,
+          ...(forensicUri ? { forensicUri } : {}),
         }),
       );
       await transitionLabel(

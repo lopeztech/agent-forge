@@ -127,6 +127,19 @@ data "aws_iam_policy_document" "task" {
       resources = [var.event_bus_arn]
     }
   }
+
+  # Forensic-report dump on park. Scoped to the role's own prefix in the
+  # bucket so a misbehaving role can't clobber another role's blobs.
+  dynamic "statement" {
+    for_each = var.forensic_bucket_arn != "" ? [1] : []
+    content {
+      sid     = "PutForensicArtifacts"
+      actions = ["s3:PutObject"]
+      resources = [
+        "${var.forensic_bucket_arn}/*/*/${var.role}-*.json",
+      ]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "task" {
