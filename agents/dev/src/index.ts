@@ -324,6 +324,8 @@ function buildUserMessage(args: {
   lockedAreaIds: string[];
   branchName: string;
   defaultBranch: string;
+  resumed: boolean;
+  attempt: number;
   testCommand: string | undefined;
 }): string {
   const ac = (args.baExpansion.acceptance_criteria ?? [])
@@ -334,6 +336,12 @@ function buildUserMessage(args: {
   const testLine = args.testCommand
     ? `**Test command** (the wrapper will re-run before opening the PR): \`${args.testCommand}\``
     : "**Test command:** _none configured for this product — submit_done will not run tests. You should still verify your change manually._";
+  const workspaceLine = args.resumed
+    ? `You're on branch \`${args.branchName}\` — **this is attempt ${args.attempt}**, resumed from the previous attempt's tip. Test's commits + your prior commits are already on this branch (run \`git log --oneline ${args.defaultBranch}..HEAD\` to see them). The PR is still open; you're adding to it.`
+    : `You're on branch \`${args.branchName}\`, branched from \`${args.defaultBranch}\`. The PR opens against \`${args.defaultBranch}\` when you call submit_done.`;
+  const kickbackHint = args.resumed
+    ? "Because this is a kickback re-run, look at the most recent comment from the kicking role (Functional / Security / PO) on the issue — it lists the specific deltas you need to address."
+    : "";
 
   return [
     `Issue #${args.issue.number}: ${args.issue.title}`,
@@ -354,14 +362,15 @@ function buildUserMessage(args: {
     oos,
     "",
     "## Workspace",
-    `You're on branch \`${args.branchName}\`, branched from \`${args.defaultBranch}\`. The PR opens against \`${args.defaultBranch}\` when you call submit_done.`,
+    workspaceLine,
+    kickbackHint,
     "",
     testLine,
     "",
     "## Locked areas",
     `You hold area locks on: ${args.lockedAreaIds.map((a) => `\`${a}\``).join(", ")}.`,
     "Stay within those areas; if you need to touch outside them, surface it in submit_done.pr_body so the PO can decide.",
-  ].join("\n");
+  ].filter((s) => s !== "").join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -749,7 +758,7 @@ async function main(): Promise<void> {
     // 2. Configure git committer (per-role audit hook on author.email) and
     //    check out a fresh feature branch.
     const branchName = `agent-forge/dev/issue-${ISSUE_NUMBER}`;
-    const { defaultBranch } = await setupWorkdir({
+    const { defaultBranch, resumed } = await setupWorkdir({
       workdir: workdir.path,
       identity: {
         name: `agent-forge-${ROLE}[bot]`,
@@ -757,7 +766,12 @@ async function main(): Promise<void> {
       },
       branchName,
     });
-    log({ msg: "set up workdir", branch: branchName, default_branch: defaultBranch });
+    log({
+      msg: "set up workdir",
+      branch: branchName,
+      default_branch: defaultBranch,
+      resumed,
+    });
 
     // 3. Read BA expansion + spec for context.
     const baExpansion = await requireBAExpansion({
@@ -868,6 +882,8 @@ async function main(): Promise<void> {
       lockedAreaIds: result.lease.areaIds,
       branchName,
       defaultBranch,
+      resumed,
+      attempt,
       testCommand,
     });
 

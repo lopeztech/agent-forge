@@ -22,17 +22,30 @@ export type SetupWorkdirOpts = {
 
 export type SetupWorkdirResult = {
   defaultBranch: string;
+  // True when the feature branch already existed on origin and Dev is
+  // continuing from it (kickback resume). False on a fresh attempt where
+  // the branch was created from the default branch's HEAD.
+  resumed: boolean;
 };
 
 // Called right after clone — captures the default branch (the one the agent's
-// changes will be PR'd against), pins git identity, and checks out a fresh
-// feature branch the agent works on.
+// changes will be PR'd against), pins git identity, and checks out the
+// feature branch.
+//
+// Resume semantics (F.2.b follow-up): if a previous Dev attempt on this issue
+// already pushed `branchName` to origin (kickback flow), check out from the
+// remote tip so this attempt builds on top of Test's commits + any prior Dev
+// work. Otherwise create the branch fresh from the default branch's HEAD.
+//
+// `git fetch origin <branch>` is the cheapest way to detect whether the
+// branch exists on origin: exit 0 if it does, non-zero if it doesn't. The
+// shallow clone (depth=20) gives us enough history that pushing a force-with-
+// lease later is reliable.
 export async function setupWorkdir(
   opts: SetupWorkdirOpts,
 ): Promise<SetupWorkdirResult> {
   const { workdir, identity, branchName } = opts;
 
-  // The default branch is the one git clone checked out (HEAD's current ref).
   const refRun = await runBashRaw(
     "git rev-parse --abbrev-ref HEAD",
     workdir,
@@ -55,13 +68,35 @@ export async function setupWorkdir(
     workdir,
     "set git user.email",
   );
-  await runOrThrow(
-    `git checkout -B ${shellQuote(branchName)}`,
-    workdir,
-    "create feature branch",
-  );
 
-  return { defaultBranch };
+  // Probe origin for the feature branch. The clone was --single-branch, so
+  // origin/<branchName> isn't tracked yet; an explicit fetch creates the
+  // local ref if the branch exists upstream.
+  const fetchRun = await runBashRaw(
+    `git fetch origin ${shellQuote(branchName)}`,
+    workdir,
+    30_000,
+  );
+  const resumed = fetchRun.exitCode === 0;
+
+  if (resumed) {
+    // Resume from the remote tip. -B creates the local branch if absent or
+    // resets it to origin/<branchName> if present.
+    await runOrThrow(
+      `git checkout -B ${shellQuote(branchName)} ${shellQuote(`origin/${branchName}`)}`,
+      workdir,
+      "checkout existing feature branch",
+    );
+  } else {
+    // Fresh attempt — branch off the default branch's HEAD.
+    await runOrThrow(
+      `git checkout -B ${shellQuote(branchName)}`,
+      workdir,
+      "create feature branch",
+    );
+  }
+
+  return { defaultBranch, resumed };
 }
 
 export type FinalizeOpts = {
