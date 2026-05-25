@@ -63,6 +63,7 @@ import {
   type IterAttempt,
 } from "../../../shared/labels.ts";
 import { acquireAreaLocks } from "../../../shared/locks/area-locks.ts";
+import { addWaiter } from "../../../shared/locks/waiters.ts";
 import {
   costUsd,
   getModelByTier,
@@ -102,6 +103,7 @@ const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
 const AREA_LOCKS_TABLE = requiredEnv("AGENT_FORGE_AREA_LOCKS_TABLE");
+const LOCK_WAITERS_TABLE = requiredEnv("AGENT_FORGE_LOCK_WAITERS_TABLE");
 const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
@@ -639,16 +641,19 @@ function commentLockContended(
   runId: string,
   attempted: string[],
   blockedAreaId: string,
+  waitingAreaIds: string[],
 ): string {
-  const list = attempted.map((a) => `\`${a}\``).join(", ");
+  const attemptedList = attempted.map((a) => `\`${a}\``).join(", ");
+  const waitingList = waitingAreaIds.map((a) => `\`${a}\``).join(", ");
   return [
     HEADER(runId),
     "",
-    `Tried to acquire locks (alphabetical): ${list}.`,
+    `Tried to acquire locks (alphabetical): ${attemptedList}.`,
     `Blocked at \`${blockedAreaId}\` — another Dev currently holds it.`,
     "",
-    `Parking at \`${HUMAN_NEEDED_LABEL}\` for this slice. Once the sweeper Lambda ` +
-      "(future slice) is wired, contention will instead re-queue the issue at `state:ready`.",
+    `Queued at: ${waitingList || "_(none)_"}. The sweeper Lambda re-fires Dev ` +
+      "for the oldest waiter on each area when the holder releases. Issue stays " +
+      "at `state:ready`; no human action needed.",
   ].join("\n");
 }
 
@@ -770,19 +775,53 @@ async function main(): Promise<void> {
       blocked_area_id: result.blockedAreaId,
       lock_source: lockSource,
     });
+    // Phase C: write a waiter row for every area we wanted (not just the
+    // one we blocked on — when one area releases we still won't be able
+    // to acquire if another we need is held; the sweeper re-fires Dev,
+    // Dev's next attempt re-checks contention, and either acquires all or
+    // requeues). Issue stays at state:ready; no human action needed.
+    const waiterTtl = LOCK_TTL_SECONDS;
+    const waiterAreaIds = attemptedAreaIds;
+    for (const areaId of waiterAreaIds) {
+      try {
+        await addWaiter({
+          tableName: LOCK_WAITERS_TABLE,
+          productId: PRODUCT_ID,
+          areaId,
+          issueNumber: ISSUE_NUMBER,
+          repo: REPO,
+          deliveryId: DELIVERY_ID,
+          ttlSeconds: waiterTtl,
+        });
+      } catch (err) {
+        // A waiter-write failure isn't fatal — at worst this issue won't
+        // be auto-re-fired by the sweeper, but the next webhook (any
+        // label change) will re-fire Dev which re-tries the acquire.
+        log({
+          msg: "addWaiter failed (non-fatal)",
+          area_id: areaId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    log({
+      msg: "queued waiters",
+      area_ids: waiterAreaIds,
+      ttl_seconds: waiterTtl,
+    });
     await postComment(
       ghOpts,
       REPO,
       ISSUE_NUMBER,
-      commentLockContended(runId, attemptedAreaIds, result.blockedAreaId),
+      commentLockContended(
+        runId,
+        attemptedAreaIds,
+        result.blockedAreaId,
+        waiterAreaIds,
+      ),
     );
-    await transitionLabel(
-      ghOpts,
-      REPO,
-      ISSUE_NUMBER,
-      STATE_LABELS.ready,
-      HUMAN_NEEDED_LABEL,
-    );
+    // Issue stays at state:ready — sweeper re-fires Dev when a holder
+    // releases. No label transition.
     return;
   }
 

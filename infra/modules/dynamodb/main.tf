@@ -89,6 +89,23 @@ locals {
       ttl_attribute            = "expires_at"
       global_secondary_indexes = []
     }
+
+    # Phase C — Dev waits for an area lock here when it can't acquire.
+    # SK encodes `<area_id>#<created_at_iso>#<issue_number>` so a Query on
+    # (product_id, begins_with(area_waiter_id, "<area>#")) returns all
+    # waiters for that area in time order (oldest first). The sweeper
+    # Lambda picks the head of that list and re-triggers Dev. TTL purges
+    # abandoned waiters (matches Dev's wall-clock cap).
+    lock_waiters = {
+      hash_key  = "product_id"
+      range_key = "area_waiter_id"
+      attributes = [
+        { name = "product_id", type = "S" },
+        { name = "area_waiter_id", type = "S" },
+      ]
+      ttl_attribute            = "expires_at"
+      global_secondary_indexes = []
+    }
   }
 }
 
