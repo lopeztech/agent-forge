@@ -26,6 +26,7 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
+import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -48,6 +49,7 @@ import {
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
+  parseIterLabel,
 } from "../../../shared/labels.ts";
 import {
   costUsd,
@@ -286,22 +288,41 @@ function commentSecurityClean(args: {
   ].filter((s) => s !== "").join("\n");
 }
 
-function commentSecurityBlocked(args: {
+function commentSecurityBlockedKickback(args: {
   runId: string;
   modelId: string;
   turns: number;
   report: SecurityReport;
+  newAttempt: number;
+  kickbackCount: number;
 }): string {
   return [
-    `## Security review: BLOCKED (Slice E, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    `## Security review: BLOCKED → KICKBACK (Slice E, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
     "",
     `**Worst severity:** \`${args.report.worst_severity}\``,
     "",
     args.report.summary,
     "",
     args.report.findings ? "### Findings\n\n" + args.report.findings + "\n" : "",
-    `Parking at \`${HUMAN_NEEDED_LABEL}\`. A future slice (E.2) will instead ` +
-      "kick this back to Dev by transitioning to `state:in-dev` and incrementing `iter:N`.",
+    `Kicking back to Dev — transitioning \`${STATE_LABELS.awaitingSecurity}\` → \`${STATE_LABELS.ready}\` with \`iter:${args.newAttempt}\`. (Kickback count for this issue: ${args.kickbackCount}.)`,
+  ].filter((s) => s !== "").join("\n");
+}
+
+function commentSecurityBlockedCapped(args: {
+  runId: string;
+  modelId: string;
+  turns: number;
+  report: SecurityReport;
+}): string {
+  return [
+    `## Security review: BLOCKED → AT CAP (Slice E, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
+    "",
+    `**Worst severity:** \`${args.report.worst_severity}\``,
+    "",
+    args.report.summary,
+    "",
+    args.report.findings ? "### Findings\n\n" + args.report.findings + "\n" : "",
+    `Already at \`iter:3\` (the per-issue Dev attempt cap). Parking at \`${HUMAN_NEEDED_LABEL}\` rather than re-kickback — a human must triage the finding (close the issue, accept the risk + skip Security, etc.).`,
   ].filter((s) => s !== "").join("\n");
 }
 
@@ -553,25 +574,60 @@ async function main(): Promise<void> {
         STATE_LABELS.awaitingPo,
       );
     } else if (capturedReport) {
-      await postComment(
+      // E.2 / F.2.b: kick back to Dev unless at iter:3 cap.
+      const currentAttempt = parseIterLabel(issue.labels ?? []);
+      const k = await kickbackToDev({
         ghOpts,
-        REPO,
-        ISSUE_NUMBER,
-        commentSecurityBlocked({
-          runId,
-          modelId: model.bedrockModelId,
-          turns: loop.turns,
-          report: capturedReport,
-        }),
-      );
-      // E.1: park at human-needed on blocking. E.2 kicks back to Dev.
-      await transitionLabel(
-        ghOpts,
-        REPO,
-        ISSUE_NUMBER,
-        STATE_LABELS.awaitingSecurity,
-        HUMAN_NEEDED_LABEL,
-      );
+        repo: REPO,
+        issueNumber: ISSUE_NUMBER,
+        currentState: STATE_LABELS.awaitingSecurity,
+        currentAttempt,
+        issueStateTable: ISSUE_STATE_TABLE,
+        productId: PRODUCT_ID,
+        fromRole: ROLE,
+        runId,
+      });
+      if (k.kind === "kickback") {
+        log({
+          msg: "kicked back to Dev",
+          from_state: STATE_LABELS.awaitingSecurity,
+          new_attempt: k.newAttempt,
+          kickback_count: k.kickbackCount,
+        });
+        await postComment(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          commentSecurityBlockedKickback({
+            runId,
+            modelId: model.bedrockModelId,
+            turns: loop.turns,
+            report: capturedReport,
+            newAttempt: k.newAttempt,
+            kickbackCount: k.kickbackCount,
+          }),
+        );
+      } else {
+        log({ msg: "at iter cap; parking instead of kicking back" });
+        await postComment(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          commentSecurityBlockedCapped({
+            runId,
+            modelId: model.bedrockModelId,
+            turns: loop.turns,
+            report: capturedReport,
+          }),
+        );
+        await transitionLabel(
+          ghOpts,
+          REPO,
+          ISSUE_NUMBER,
+          STATE_LABELS.awaitingSecurity,
+          HUMAN_NEEDED_LABEL,
+        );
+      }
     } else {
       await postComment(
         ghOpts,

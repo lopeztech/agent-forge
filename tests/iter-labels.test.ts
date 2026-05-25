@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 
 import {
   hasComplexityHighLabel,
+  nextIterAttempt,
   parseIterLabel,
 } from "../shared/labels.ts";
 
@@ -37,6 +38,24 @@ describe("parseIterLabel", () => {
       parseIterLabel([{ name: "iter:99" }, { name: "iter-1" }, { name: "iteration:1" }]),
       undefined,
     );
+  });
+});
+
+describe("nextIterAttempt", () => {
+  it("bumps 1 → 2", () => {
+    assert.equal(nextIterAttempt(1), 2);
+  });
+
+  it("bumps 2 → 3", () => {
+    assert.equal(nextIterAttempt(2), 3);
+  });
+
+  it("returns 'cap' from 3 (no further attempts allowed)", () => {
+    assert.equal(nextIterAttempt(3), "cap");
+  });
+
+  it("defensive: undefined is treated as 1 → next is 2", () => {
+    assert.equal(nextIterAttempt(undefined), 2);
   });
 });
 
