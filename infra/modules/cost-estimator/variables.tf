@@ -48,6 +48,16 @@ variable "budget_ledger_table_arn" {
   description = "DynamoDB budget_ledger table ARN."
 }
 
+variable "rate_limits_table_name" {
+  type        = string
+  description = "DynamoDB rate_limits table name. Passed to the Lambda as AGENT_FORGE_RATE_LIMITS_TABLE so the Bedrock call is throttled by the shared org-wide bucket."
+}
+
+variable "rate_limits_table_arn" {
+  type        = string
+  description = "DynamoDB rate_limits table ARN."
+}
+
 variable "bedrock_model_arns" {
   type        = list(string)
   description = "Bedrock foundation-model ARNs the Lambda may invoke. Scoped to Haiku 4.5 in v1."

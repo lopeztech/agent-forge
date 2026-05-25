@@ -26,6 +26,7 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
+import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
   buildReadToolDefinitions,
@@ -82,6 +83,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
@@ -106,6 +108,15 @@ function log(obj: Record<string, unknown>): void {
     ...obj,
   }));
 }
+
+const dumpForensicForPark = makeParkDumper({
+  bucket: FORENSIC_BUCKET,
+  issueStateTable: ISSUE_STATE_TABLE,
+  productId: PRODUCT_ID,
+  issueNumber: ISSUE_NUMBER,
+  role: ROLE,
+  log,
+});
 
 // ---------------------------------------------------------------------------
 // System prompt + tool
@@ -313,6 +324,7 @@ function commentSecurityBlockedCapped(args: {
   modelId: string;
   turns: number;
   report: SecurityReport;
+  forensicUri?: string;
 }): string {
   return [
     `## Security review: BLOCKED → AT CAP (Slice E, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
@@ -323,6 +335,7 @@ function commentSecurityBlockedCapped(args: {
     "",
     args.report.findings ? "### Findings\n\n" + args.report.findings + "\n" : "",
     `Already at \`iter:3\` (the per-issue Dev attempt cap). Parking at \`${HUMAN_NEEDED_LABEL}\` rather than re-kickback — a human must triage the finding (close the issue, accept the risk + skip Security, etc.).`,
+    args.forensicUri ? "\n" + forensicFooter(args.forensicUri) : "",
   ].filter((s) => s !== "").join("\n");
 }
 
@@ -331,6 +344,7 @@ function commentNoReport(args: {
   modelId: string;
   turns: number;
   stopReason: string;
+  forensicUri?: string;
 }): string {
   return [
     `## Security review did not complete (Slice E, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"}, stop=\`${args.stopReason}\`)`,
@@ -338,7 +352,8 @@ function commentNoReport(args: {
     "Agent exited without calling `submit_security_done`.",
     "",
     `Parking at \`${HUMAN_NEEDED_LABEL}\`.`,
-  ].join("\n");
+    args.forensicUri ? "\n" + forensicFooter(args.forensicUri) : "",
+  ].filter((s) => s !== "").join("\n");
 }
 
 function commentMissingExpansion(runId: string): string {
@@ -609,6 +624,20 @@ async function main(): Promise<void> {
         );
       } else {
         log({ msg: "at iter cap; parking instead of kicking back" });
+        const forensicUri = await dumpForensicForPark({
+          reason: "Security blocked but issue is at iter:3 cap; parked",
+          stopReason: loop.stopReason,
+          turns: loop.turns,
+          toolCallCounts,
+          loopMessages: loop.messages,
+          costUsd: loop.costUsd,
+          extra: {
+            outcome: capturedReport.outcome,
+            worst_severity: capturedReport.worst_severity,
+            report: capturedReport,
+          },
+          runId,
+        });
         await postComment(
           ghOpts,
           REPO,
@@ -618,6 +647,7 @@ async function main(): Promise<void> {
             modelId: model.bedrockModelId,
             turns: loop.turns,
             report: capturedReport,
+            ...(forensicUri ? { forensicUri } : {}),
           }),
         );
         await transitionLabel(
@@ -629,6 +659,15 @@ async function main(): Promise<void> {
         );
       }
     } else {
+      const forensicUri = await dumpForensicForPark({
+        reason: `Security did not call submit_security_done (stop=${loop.stopReason})`,
+        stopReason: loop.stopReason,
+        turns: loop.turns,
+        toolCallCounts,
+        loopMessages: loop.messages,
+        costUsd: loop.costUsd,
+        runId,
+      });
       await postComment(
         ghOpts,
         REPO,
@@ -638,6 +677,7 @@ async function main(): Promise<void> {
           modelId: model.bedrockModelId,
           turns: loop.turns,
           stopReason: loop.stopReason,
+          ...(forensicUri ? { forensicUri } : {}),
         }),
       );
       await transitionLabel(

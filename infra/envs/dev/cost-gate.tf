@@ -51,6 +51,8 @@ module "cost_estimator" {
   issue_state_table_arn    = module.dynamodb.table_arns["issue_state"]
   budget_ledger_table_name = module.dynamodb.table_names["budget_ledger"]
   budget_ledger_table_arn  = module.dynamodb.table_arns["budget_ledger"]
+  rate_limits_table_name   = module.dynamodb.table_names["rate_limits"]
+  rate_limits_table_arn    = module.dynamodb.table_arns["rate_limits"]
 
   bedrock_model_arns = local.bedrock_invoke_arns["haiku-4-5"]
 

@@ -26,6 +26,7 @@
 //   - team_memory read/write
 //   - Opus 4.7 escalation for brand-new spec hydration
 
+import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile, type AreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -75,6 +76,7 @@ const APP_SECRET_NAME = requiredEnv("AGENT_FORGE_APP_SECRET_NAME");
 const PRODUCTS_TABLE = requiredEnv("AGENT_FORGE_PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("AGENT_FORGE_ISSUE_STATE_TABLE");
 const BUDGET_LEDGER_TABLE = requiredEnv("AGENT_FORGE_BUDGET_LEDGER_TABLE");
+const FORENSIC_BUCKET = process.env.AGENT_FORGE_FORENSIC_BUCKET;
 const ROLE = requiredEnv("AGENT_FORGE_ROLE");
 const ENV = requiredEnv("AGENT_FORGE_ENV");
 const DELIVERY_ID = process.env.AGENT_FORGE_DELIVERY_ID ?? "unknown";
@@ -96,6 +98,15 @@ function log(obj: Record<string, unknown>): void {
     ...obj,
   }));
 }
+
+const dumpForensicForPark = makeParkDumper({
+  bucket: FORENSIC_BUCKET,
+  issueStateTable: ISSUE_STATE_TABLE,
+  productId: PRODUCT_ID,
+  issueNumber: ISSUE_NUMBER,
+  role: ROLE,
+  log,
+});
 
 // ---------------------------------------------------------------------------
 // Types
@@ -449,6 +460,7 @@ function buildComment(
   modelId: string,
   runId: string,
   areaSummary: AreaSummary,
+  forensicUri: string | undefined,
 ): string {
   const conflicted = expansion.spec_conflict.detected;
   const areaParked = !conflicted && areaSummary.kind === "park";
@@ -498,7 +510,8 @@ function buildComment(
     transitionLine,
     "",
     fmtSpecFooter(spec, specPath),
-  ].join("\n");
+    forensicUri ? "\n" + forensicFooter(forensicUri) : "",
+  ].filter((s) => s !== "").join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -666,6 +679,28 @@ async function main(): Promise<void> {
         ? { kind: "concrete", areaIds: areaDecision.areaIds }
         : { kind: "park", reason: areaDecision.reason };
 
+  // BA only parks on the two model-verdict gaps (spec_conflict, area-mapping
+  // failure). Pre-model parks (areas.yml missing — handled above) skip the
+  // dump for parity with Dev's "no loop state to capture" sites.
+  const parking = conflicted || areaDecision.kind === "park";
+  const parkReason = conflicted
+    ? `BA detected spec conflict: ${expansion.spec_conflict.reason.slice(0, 200)}`
+    : areaDecision.kind === "park"
+      ? `BA could not map issue to any declared area: ${areaDecision.reason}`
+      : "";
+  const forensicUri = parking
+    ? await dumpForensicForPark({
+        reason: parkReason,
+        costUsd: baCostUsd,
+        extra: {
+          park_kind: conflicted ? "spec_conflict" : "area_mapping_failed",
+          expansion,
+          area_summary: areaSummary,
+        },
+        runId,
+      })
+    : undefined;
+
   await postComment(
     ghOpts,
     REPO,
@@ -677,6 +712,7 @@ async function main(): Promise<void> {
       model.bedrockModelId,
       runId,
       areaSummary,
+      forensicUri,
     ),
   );
   log({ msg: "posted expansion comment" });
