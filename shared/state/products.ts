@@ -50,6 +50,35 @@ export type ProductConfig = {
   // at human-needed before the next model call. Default 12 USD per CLAUDE.md
   // → Cost model.
   per_issue_budget_cap_usd?: number;
+  // Daily caps from CLAUDE.md → Cost model. Per-day = UTC midnight to UTC
+  // midnight. When a scope's daily spend exceeds its cap, that scope's
+  // budget_tripped_* fields are set and subsequent role runs short-circuit
+  // until a human clears them (delete the field) or until the next UTC day.
+  per_role_daily_budget_cap_usd?: number;       // default $30
+  per_product_daily_budget_cap_usd?: number;    // default $75
+  // Only honored on the `product_id="*"` row. Default $250.
+  global_daily_budget_cap_usd?: number;
+  // Trip flags. Set by shared/budget/caps.ts when a cap is exceeded; read
+  // by the same module at pre-flight to short-circuit a role's run.
+  //
+  //   - Per-product flag: set on `products[product_id]`.
+  //   - Per-role flag: set under `budget_tripped_roles[<role>]` on the
+  //                    same products row.
+  //   - Global flag: set on `products["*"]`.
+  //
+  // `for_date` is a YYYY-MM-DD UTC string. Old trip flags (different date)
+  // are ignored — daily caps reset at UTC midnight by design.
+  budget_tripped_at_iso?: string;
+  budget_tripped_for_date?: string;
+  budget_tripped_reason?: string;
+  budget_tripped_roles?: Record<
+    string,
+    {
+      at_iso: string;
+      for_date: string;
+      reason: string;
+    }
+  >;
   // When true, PO autonomously merges the PR on verdict=approve via the
   // merger App. When false (default), PO posts a "recommend approve"
   // comment and parks at human-needed for a human to merge. Per CLAUDE.md

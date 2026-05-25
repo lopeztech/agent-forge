@@ -99,3 +99,111 @@ export async function getIssueSpendUsd(
   } while (exclusiveStartKey);
   return total;
 }
+
+// ----------------------------------------------------------------------------
+// Day-range rollups
+// ----------------------------------------------------------------------------
+//
+// The SK shape `<iso_ts>#<run_id>` lets us cheaply Query a partition for
+// rows within a [start_iso, end_iso) window — both inclusive ts_run_id
+// boundaries can be computed by appending sentinel suffixes to the ISO
+// timestamp. We use this to compute today's spend per product (and per role
+// within a product) without needing a GSI.
+//
+// Global daily rollup (across all products) isn't done here because it
+// requires scanning the products table; today's pre-flight check stays
+// per-(product, role) for cheapness, and global enforcement is via the trip
+// flag (a scheduled rollup Lambda writes it).
+
+export type DayUtc = {
+  // YYYY-MM-DD in UTC.
+  date: string;
+  // ISO timestamp at 00:00:00.000Z.
+  startIso: string;
+  // ISO timestamp at the next UTC midnight (exclusive).
+  endIso: string;
+};
+
+// Computes the UTC day for a given Date (or `new Date()`). UTC keeps daily
+// caps deterministic across regions.
+export function utcDayFor(d: Date = new Date()): DayUtc {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const date = `${y}-${m}-${dd}`;
+  const startIso = `${date}T00:00:00.000Z`;
+  const endDate = new Date(Date.UTC(y, d.getUTCMonth(), d.getUTCDate() + 1));
+  const endIso = endDate.toISOString();
+  return { date, startIso, endIso };
+}
+
+export type GetSpendBetweenOpts = {
+  tableName: string;
+  productId: string;
+  fromIso: string; // inclusive
+  toIso: string; // exclusive
+  // Optional role filter. When set, only rows where `role` matches accumulate.
+  role?: string;
+};
+
+// Sum cost_usd for budget_ledger rows in [fromIso, toIso) for a product,
+// optionally filtered by role. Uses the partition's SK BETWEEN to keep the
+// scan tight; a role filter adds a FilterExpression. Paginates.
+//
+// SK format: `<iso_ts>#<run_id>`. We use the ISO timestamps directly as SK
+// bounds — lexicographic ordering matches chronological ordering, and the
+// suffix `#<run_id>` is irrelevant for BETWEEN bounds at day boundaries.
+export async function getSpendBetweenUsd(
+  opts: GetSpendBetweenOpts,
+): Promise<number> {
+  let total = 0;
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const expressionAttributeValues: Record<string, unknown> = {
+      ":p": opts.productId,
+      ":from": opts.fromIso,
+      ":to": opts.toIso,
+    };
+    const queryParams: import("@aws-sdk/lib-dynamodb").QueryCommandInput = {
+      TableName: opts.tableName,
+      KeyConditionExpression:
+        "product_id = :p AND ts_run_id BETWEEN :from AND :to",
+      ExpressionAttributeValues: expressionAttributeValues,
+    };
+    if (opts.role) {
+      expressionAttributeValues[":role"] = opts.role;
+      queryParams.FilterExpression = "#r = :role";
+      queryParams.ExpressionAttributeNames = { "#r": "role" };
+    }
+    if (exclusiveStartKey) queryParams.ExclusiveStartKey = exclusiveStartKey;
+
+    const r = await ddb().send(new QueryCommand(queryParams));
+    for (const item of r.Items ?? []) {
+      const cost = item["cost_usd"];
+      if (typeof cost === "number") total += cost;
+    }
+    exclusiveStartKey = r.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+  return total;
+}
+
+export type GetSpendTodayOpts = {
+  tableName: string;
+  productId: string;
+  role?: string;
+  now?: Date;
+};
+
+// Convenience wrapper: today's spend for a (product, [role]) scope.
+export async function getSpendTodayUsd(
+  opts: GetSpendTodayOpts,
+): Promise<number> {
+  const day = utcDayFor(opts.now ?? new Date());
+  return getSpendBetweenUsd({
+    tableName: opts.tableName,
+    productId: opts.productId,
+    fromIso: day.startIso,
+    toIso: day.endIso,
+    ...(opts.role ? { role: opts.role } : {}),
+  });
+}

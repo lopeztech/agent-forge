@@ -26,6 +26,11 @@
 //   - team_memory read/write
 //   - Opus 4.7 escalation for brand-new spec hydration
 
+import {
+  checkBudgetCaps,
+  formatBudgetTripComment,
+  type BudgetTrip,
+} from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile, type AreasFile } from "../../../shared/github/areas.ts";
@@ -436,6 +441,17 @@ function bullets(items: string[], fallback = "_(none)_"): string {
   return items.map((s) => `- ${s}`).join("\n");
 }
 
+function commentDayBudgetTripped(args: {
+  runId: string;
+  trip: BudgetTrip;
+}): string {
+  return [
+    `## BA did not run (run \`${args.runId}\`)`,
+    "",
+    formatBudgetTripComment(args.trip),
+  ].join("\n");
+}
+
 function fmtSpecFooter(spec: SpecReadResult, specPath: string): string {
   if (spec.missing) {
     return `<sub>spec: no \`${specPath}\` directory found in repo — expansion based on issue body only.</sub>`;
@@ -582,6 +598,37 @@ async function main(): Promise<void> {
 
   const issue = await fetchIssue(token);
   log({ msg: "fetched issue", title: issue.title });
+
+  const ghOptsEarly = { token, userAgent: USER_AGENT };
+  const runIdEarly = runIdFromEnv();
+
+  // Day-scope budget caps. BA has no per-issue cap (it runs once and the
+  // call is small) but still participates in per-role / per-product /
+  // global daily caps. Trip → short-circuit + park.
+  const capCheck = await checkBudgetCaps({
+    productsTable: PRODUCTS_TABLE,
+    budgetLedgerTable: BUDGET_LEDGER_TABLE,
+    productId: PRODUCT_ID,
+    role: ROLE,
+    product,
+  });
+  if (!capCheck.ok) {
+    log({ msg: "day-scope budget cap tripped", trip: capCheck.trip });
+    await postComment(
+      ghOptsEarly,
+      REPO,
+      ISSUE_NUMBER,
+      commentDayBudgetTripped({ runId: runIdEarly, trip: capCheck.trip }),
+    );
+    await transitionLabel(
+      ghOptsEarly,
+      REPO,
+      ISSUE_NUMBER,
+      STATE_LABELS.idea,
+      HUMAN_NEEDED_LABEL,
+    );
+    return;
+  }
 
   const specPath = product.spec_path ?? "spec/";
   const spec = await readSpecTree({

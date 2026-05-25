@@ -26,6 +26,11 @@
 
 import { runAgentLoop, type ToolCall } from "../../../shared/agent-loop.ts";
 import { getIssueSpendUsd, recordSpend } from "../../../shared/budget.ts";
+import {
+  checkBudgetCaps,
+  formatBudgetTripComment,
+  type BudgetTrip,
+} from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
@@ -350,6 +355,17 @@ function commentBudgetCapTripped(args: {
   ].join("\n");
 }
 
+function commentDayBudgetTripped(args: {
+  runId: string;
+  trip: BudgetTrip;
+}): string {
+  return [
+    `## Functional did not run (run \`${args.runId}\`)`,
+    "",
+    formatBudgetTripComment(args.trip),
+  ].join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -438,6 +454,31 @@ async function main(): Promise<void> {
     await postComment(ghOpts, REPO, ISSUE_NUMBER, commentBudgetCapTripped({
       runId, spentSoFar, capUsd: budgetCapUsd,
     }));
+    await transitionLabel(
+      ghOpts,
+      REPO,
+      ISSUE_NUMBER,
+      STATE_LABELS.awaitingFunctional,
+      HUMAN_NEEDED_LABEL,
+    );
+    return;
+  }
+
+  const capCheck = await checkBudgetCaps({
+    productsTable: PRODUCTS_TABLE,
+    budgetLedgerTable: BUDGET_LEDGER_TABLE,
+    productId: PRODUCT_ID,
+    role: ROLE,
+    product,
+  });
+  if (!capCheck.ok) {
+    log({ msg: "day-scope budget cap tripped", trip: capCheck.trip });
+    await postComment(
+      ghOpts,
+      REPO,
+      ISSUE_NUMBER,
+      commentDayBudgetTripped({ runId, trip: capCheck.trip }),
+    );
     await transitionLabel(
       ghOpts,
       REPO,
