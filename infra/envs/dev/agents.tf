@@ -97,6 +97,7 @@ module "agent_ba" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -107,6 +108,7 @@ module "agent_ba" {
     issue_state   = module.dynamodb.table_arns["issue_state"]
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+    rate_limits   = module.dynamodb.table_arns["rate_limits"]
     area_locks    = module.dynamodb.table_arns["area_locks"]
   }
 
@@ -140,6 +142,7 @@ module "agent_dev" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
     AGENT_FORGE_AREA_LOCKS_TABLE    = module.dynamodb.table_names["area_locks"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
@@ -152,6 +155,7 @@ module "agent_dev" {
     issue_state   = module.dynamodb.table_arns["issue_state"]
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+    rate_limits   = module.dynamodb.table_arns["rate_limits"]
     area_locks    = module.dynamodb.table_arns["area_locks"]
   }
 
@@ -209,6 +213,7 @@ module "agent_test" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -219,6 +224,7 @@ module "agent_test" {
     issue_state   = module.dynamodb.table_arns["issue_state"]
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+    rate_limits   = module.dynamodb.table_arns["rate_limits"]
   }
 
   forensic_bucket_arn = module.forensic_artifacts.bucket_arn
@@ -250,6 +256,7 @@ module "agent_functional" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -258,6 +265,7 @@ module "agent_functional" {
     issue_state   = module.dynamodb.table_arns["issue_state"]
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+    rate_limits   = module.dynamodb.table_arns["rate_limits"]
   }
 
   forensic_bucket_arn = module.forensic_artifacts.bucket_arn
@@ -289,6 +297,7 @@ module "agent_security" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
 
@@ -297,6 +306,7 @@ module "agent_security" {
     issue_state   = module.dynamodb.table_arns["issue_state"]
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+    rate_limits   = module.dynamodb.table_arns["rate_limits"]
   }
 
   forensic_bucket_arn = module.forensic_artifacts.bucket_arn
@@ -332,6 +342,7 @@ module "agent_po" {
   extra_environment = {
     AGENT_FORGE_ISSUE_STATE_TABLE   = module.dynamodb.table_names["issue_state"]
     AGENT_FORGE_BUDGET_LEDGER_TABLE = module.dynamodb.table_names["budget_ledger"]
+    AGENT_FORGE_RATE_LIMITS_TABLE   = module.dynamodb.table_names["rate_limits"]
     AGENT_FORGE_MERGER_SECRET_NAME  = module.secrets.merger_secret_name
     AGENT_FORGE_FORENSIC_BUCKET     = module.forensic_artifacts.bucket_name
   }
@@ -341,6 +352,7 @@ module "agent_po" {
     issue_state   = module.dynamodb.table_arns["issue_state"]
     team_memory   = module.dynamodb.table_arns["team_memory"]
     budget_ledger = module.dynamodb.table_arns["budget_ledger"]
+    rate_limits   = module.dynamodb.table_arns["rate_limits"]
   }
 
   forensic_bucket_arn = module.forensic_artifacts.bucket_arn

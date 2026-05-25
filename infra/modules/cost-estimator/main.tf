@@ -68,6 +68,19 @@ data "aws_iam_policy_document" "this" {
     resources = [var.budget_ledger_table_arn]
   }
 
+  # Token-bucket gate in front of Bedrock InvokeModel. Lazy seed (PutItem
+  # with attribute_not_exists) + optimistic refill-and-deduct (UpdateItem
+  # with last_refill_at_ms condition).
+  statement {
+    sid = "RateLimitsBucket"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+    ]
+    resources = [var.rate_limits_table_arn]
+  }
+
   statement {
     sid       = "InvokeBedrockHaiku"
     actions   = ["bedrock:InvokeModel"]
@@ -106,6 +119,8 @@ resource "aws_lambda_function" "this" {
       APP_SECRET_NAME                     = var.app_secret_name
       HARD_PER_ISSUE_CAP_USD              = tostring(var.hard_per_issue_cap_usd)
       DEFAULT_COST_APPROVAL_THRESHOLD_USD = tostring(var.default_cost_approval_threshold_usd)
+      # shared/models.ts reads this; lazy no-op when unset.
+      AGENT_FORGE_RATE_LIMITS_TABLE = var.rate_limits_table_name
     }
   }
 

@@ -14,6 +14,13 @@ import {
   InvokeModelCommand,
 } from "@aws-sdk/client-bedrock-runtime";
 
+import { acquireTokenWaiting } from "./rate_limits/bucket.ts";
+import {
+  BEDROCK_TOKEN_WAIT_MS,
+  DEFAULT_BEDROCK_BUCKETS,
+  bucketIdForModel,
+} from "./rate_limits/config.ts";
+
 export type RoleKey =
   | "ba"
   | "cost-estimator"
@@ -249,6 +256,37 @@ type AnthropicBedrockResponse = {
   };
 };
 
+// Proactive throttle in front of every Bedrock InvokeModel. When
+// AGENT_FORGE_RATE_LIMITS_TABLE is set, acquire a token from the
+// (model, region) bucket before invoking. Reactive throttle (the SDK's
+// `adaptive` retry, 10 attempts) still backs this up if Bedrock 429s anyway.
+//
+// When the env is unset (local dev convenience) the gate is a no-op.
+async function acquireBedrockToken(modelId: string, tier: ModelTier): Promise<void> {
+  const tableName = process.env.AGENT_FORGE_RATE_LIMITS_TABLE;
+  if (!tableName) return;
+  const cfg = DEFAULT_BEDROCK_BUCKETS[tier];
+  const bucketId = bucketIdForModel(modelId);
+  const result = await acquireTokenWaiting({
+    tableName,
+    bucketId,
+    cfg,
+    maxWaitMs: BEDROCK_TOKEN_WAIT_MS,
+  });
+  // On timeout, fall through anyway. Bedrock's adaptive retry handles the
+  // 429 case better than blocking the agent forever; surfacing a Bedrock
+  // error to the caller is preferable to a wall-clock hang.
+  if (!result.acquired) {
+    console.warn(
+      JSON.stringify({
+        msg: "rate-limit wait timed out; falling through to InvokeModel",
+        bucket_id: bucketId,
+        retry_after_ms: result.retryAfterMs,
+      }),
+    );
+  }
+}
+
 function makeBedrockHandle(tier: ModelTier): ModelHandle {
   const bedrockModelId = BEDROCK_MODEL_IDS[tier];
 
@@ -266,6 +304,8 @@ function makeBedrockHandle(tier: ModelTier): ModelHandle {
       if (opts.temperature !== undefined) body.temperature = opts.temperature;
       if (opts.tools && opts.tools.length > 0) body.tools = opts.tools;
       if (opts.toolChoice) body.tool_choice = opts.toolChoice;
+
+      await acquireBedrockToken(bedrockModelId, tier);
 
       const cmd = new InvokeModelCommand({
         modelId: bedrockModelId,
