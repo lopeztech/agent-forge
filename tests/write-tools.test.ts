@@ -162,6 +162,15 @@ describe("runBashRaw", () => {
     assert.match(r.stdout, /out/);
     assert.match(r.stderr, /err/);
   });
+
+  it("exposes npm_config_include=dev so clone installs keep devDependencies", async () => {
+    // The agent images set NODE_ENV=production, which makes `npm ci` omit
+    // devDependencies (drops `typescript`, breaking the `tsc` typecheck gate).
+    // runBashRaw must force devDeps back in for every command it runs.
+    const r = await runBashRaw('echo "$npm_config_include"', WORKDIR, 10_000);
+    assert.equal(r.exitCode, 0);
+    assert.equal(r.stdout.trim(), "dev");
+  });
 });
 
 describe("dispatchWriteTool: unknown tool", () => {
