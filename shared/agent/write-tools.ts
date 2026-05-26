@@ -203,7 +203,16 @@ export async function runBashRaw(
         cwd,
         timeout: timeoutMs,
         maxBuffer: 4 * 1024 * 1024,
-        env: process.env,
+        // Agents operate on the *target repo's* dev workflow (tests, typecheck,
+        // lint), so dev tooling must be installable in the clone. The agent
+        // images set NODE_ENV=production, under which `npm ci`/`npm install`
+        // omit devDependencies — that silently dropped `typescript`, so the
+        // typecheck gate's `tsc` was "not found" on every run (PR #80 → #87
+        // revert). `npm_config_include=dev` forces dev deps back in regardless
+        // of NODE_ENV (an explicit --include always wins over --omit), without
+        // changing NODE_ENV for the commands themselves. See memory note
+        // agent-fargate-no-devdeps.
+        env: { ...process.env, npm_config_include: "dev" },
       },
       (err, stdout, stderr) => {
         // execFile's callback err is typed as ErrnoException but actually
