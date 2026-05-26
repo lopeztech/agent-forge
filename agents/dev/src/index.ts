@@ -41,6 +41,7 @@ import {
   type BudgetTrip,
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
+import { emitRoleRunFinished } from "../../../shared/metrics/emit.ts";
 import {
   RECORD_LESSON_TOOL,
   buildMemoryBlock,
@@ -1217,6 +1218,15 @@ async function main(): Promise<void> {
         output_tokens: loop.usage.output_tokens,
         cost_usd: loop.costUsd,
       },
+    });
+
+    // CloudWatch dashboard signal: succeeded when a PR opened, failed
+    // for every other terminal path (loop runaway, submit_done failure).
+    await emitRoleRunFinished({
+      role: ROLE,
+      productId: PRODUCT_ID,
+      status: finalizeResult?.kind === "ok" ? "succeeded" : "failed",
+      costUsd: loop.costUsd,
     });
 
     const recomputed = costUsd(tier, {

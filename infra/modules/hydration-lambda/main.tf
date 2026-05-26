@@ -77,6 +77,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["bedrock:InvokeModel"]
     resources = var.bedrock_model_arns
   }
+
+  statement {
+    sid       = "PublishCloudWatchMetrics"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {

@@ -28,6 +28,7 @@
 import type { ScheduledEvent } from "aws-lambda";
 
 import { recordSpend } from "../../../../shared/budget.ts";
+import { emitHydrationRun } from "../../../../shared/metrics/emit.ts";
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import {
   createIssue,
@@ -261,6 +262,12 @@ async function hydrateProduct(product: ProductConfig): Promise<number> {
       cost_usd: result.costUsd,
       note: `filed ${filed}/${parsed.gaps.length} gap issues`,
     },
+  });
+
+  await emitHydrationRun({
+    productId,
+    gapsFiled: filed,
+    costUsd: result.costUsd,
   });
 
   // Recompute as a pricing-drift assertion (same pattern as the role

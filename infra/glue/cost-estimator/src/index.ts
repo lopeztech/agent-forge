@@ -23,6 +23,7 @@
 //     but couldn't be acted on — human should look)
 
 import { makeParkDumper } from "../../../../shared/forensic/dump.ts";
+import { emitCostEstimatorRun } from "../../../../shared/metrics/emit.ts";
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import { postComment, transitionLabel } from "../../../../shared/github/repo.ts";
 import {
@@ -666,6 +667,16 @@ export async function handler(event: EventBridgeEvent): Promise<void> {
     },
   });
   log({ msg: "recorded spend", cost_usd: estimatorCostUsd });
+
+  // CloudWatch dashboard signal: decision the estimator landed on,
+  // tagged with product_id so the dashboard can grouped-area-chart
+  // approve/park/reject rates per product.
+  await emitCostEstimatorRun({
+    productId: product_id,
+    decision: decision.kind,
+    costUsd: estimatorCostUsd,
+    p50TotalUsd: totals.p50_total_usd,
+  });
 
   // Safety: re-derive cost from tier+usage to assert cost_usd / costUsd agree.
   // If they diverge, the pricing table in shared/models.ts has drifted.

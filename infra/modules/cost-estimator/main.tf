@@ -87,6 +87,14 @@ data "aws_iam_policy_document" "this" {
     resources = var.bedrock_model_arns
   }
 
+  # Custom metric emit for the agent-forge dashboard. PutMetricData
+  # only supports "*" resource scope.
+  statement {
+    sid       = "PublishCloudWatchMetrics"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+  }
+
   # Forensic-report dump on the two unexpected-park paths. Scoped to the
   # cost-estimator's own key prefix so a misbehaving Lambda can't clobber
   # other roles' blobs. Matches the per-Fargate-role grant in

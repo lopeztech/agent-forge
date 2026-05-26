@@ -59,6 +59,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["dynamodb:Query"]
     resources = [var.issue_state_table_arn]
   }
+
+  statement {
+    sid       = "PublishCloudWatchMetrics"
+    actions   = ["cloudwatch:PutMetricData"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
