@@ -99,6 +99,9 @@ export type IssueListItem = {
   state: "open" | "closed";
   html_url: string;
   labels: Array<{ name: string } | string>;
+  // ISO-8601; the GitHub list-issues response always includes it. Used by the
+  // reconciler as a "label has been stable for a while" proxy.
+  updated_at?: string;
 };
 
 // Lists issues for a repo. Default state=open, default per_page=100, paginates
