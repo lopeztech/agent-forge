@@ -92,7 +92,7 @@ Not a Fargate role — a small Lambda that gates every issue's actual implementa
 - **Job:** claim the issue, branch from `main`, implement against acceptance criteria, push commits, open a PR linking the issue, transition issue to `state:awaiting-tests`.
 - **Tools:** full git/file edits inside an isolated working copy, run unit tests locally, GitHub PR create.
 - **Default model:** **Sonnet 4.6** — best price/perf for code generation across multi-file context.
-- **Escalation:** **Opus 4.7** on the final attempt of the per-product kickback cap (default cap=3 → attempt #3), or for issues labelled `complexity:high` (cross-cutting refactors, perf-sensitive code, novel architecture).
+- **Escalation:** **Opus 4.7** on the final attempt of the per-product kickback cap (default cap=3 → attempt #3), or for issues labelled `complexity:large` (cross-cutting refactors, perf-sensitive code, novel architecture).
 - **Guards:** per-issue spend cap, per-issue iteration cap. On hit, label `human-needed` and stop.
 
 ### 3. Test Engineer (automated)
