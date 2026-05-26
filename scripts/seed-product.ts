@@ -132,6 +132,13 @@ async function main(): Promise<void> {
   const tableName = `${args.prefix}-products`;
   const region = process.env.AWS_REGION ?? "eu-west-1";
 
+  // Phase E: set the 30-day approval gate at onboarding per the 2026-05-25
+  // decision. PO suppresses auto-merge while now < approval_gate_until.
+  // After 30 days, products.auto_merge takes effect as configured.
+  const approvalGateUntil = new Date(
+    Date.now() + 30 * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
   console.log(`Seeding product into ${tableName} (${region}):`);
   console.log(`  product_id          : ${args.productId}`);
   console.log(`  repo_full_name      : ${args.repo}`);
@@ -140,6 +147,7 @@ async function main(): Promise<void> {
   console.log(`  functional_runtime  : ${args.functionalRuntime}`);
   console.log(`  cost_approval_$_p50 : ${args.costApprovalThresholdUsd}`);
   console.log(`  concurrency_cap     : ${args.concurrencyCap}`);
+  console.log(`  approval_gate_until : ${approvalGateUntil}`);
   console.log();
 
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
@@ -157,6 +165,7 @@ async function main(): Promise<void> {
         functional_runtime_mode: args.functionalRuntime,
         cost_approval_threshold_usd: args.costApprovalThresholdUsd,
         concurrency_cap: args.concurrencyCap,
+        approval_gate_until: approvalGateUntil,
         updated_at: new Date().toISOString(),
       },
     }),
