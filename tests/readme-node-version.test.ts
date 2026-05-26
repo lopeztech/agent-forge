@@ -28,7 +28,7 @@ describe("README Node version (issue #44)", () => {
     );
     assert.ok(prereqMatch, "README must contain a ## Prerequisites section");
 
-    const prereqSection = prereqMatch[1];
+    const prereqSection = prereqMatch[1]!;
     assert.match(
       prereqSection,
       /22\.6\.0/,
@@ -60,7 +60,7 @@ describe("README Node version (issue #44)", () => {
       versionMatch,
       `engines.node "${enginesNode}" must contain a semver version`,
     );
-    const pkgVersion = versionMatch[1]; // e.g. "22.6.0"
+    const pkgVersion = versionMatch[1]!; // e.g. "22.6.0"
 
     assert.match(
       README,
@@ -95,7 +95,7 @@ describe("README Node version (issue #44)", () => {
       /##\s+Prerequisites([\s\S]*?)(?=\n##\s|\s*$)/,
     );
     assert.ok(prereqMatch, "README must contain a ## Prerequisites section");
-    const prereqSection = prereqMatch[1];
+    const prereqSection = prereqMatch[1]!;
 
     assert.match(prereqSection, /npm/, "Prerequisites must still mention npm");
     assert.match(
