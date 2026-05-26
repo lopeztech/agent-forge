@@ -64,6 +64,8 @@ Networking: agents and Lambdas have no inbound traffic. Default deployment runs 
 
 Six teams. Each is a separate container image, system prompt, tool allow-list, IAM role, and GitHub App permissions scope. The model column is the **default**; any role can escalate one tier (e.g. Sonnet → Opus) on retry after a failure. Handoffs between roles run on the issue-label lifecycle described in **Handoff protocol** (`CLAUDE.md`).
 
+> **Opus version note.** This section names **Opus 4.7** as the target tier for PO and Dev-escalation. The implementation currently pins **Opus 4.6** (`eu.anthropic.claude-opus-4-6-v1`, see `shared/models.ts`) because Opus 4.7 is not yet enabled on the dev Bedrock account. Treat "Opus 4.7" below as the intended target, "Opus 4.6" as what runs today.
+
 ### 1. Business Analyst (BA)
 
 - **Trigger:** new issue with label `state:idea`, OR scheduled nightly "hydrate" run that scans the spec for un-issued work.

@@ -20,21 +20,35 @@ This repository is no longer empty. Read this document alongside the reference
 docs below, plus `spec/README.md`, `spec/roles.md`, `README.md`,
 `CONTRIBUTING.md`, and `docs/runbook.md` before making changes.
 
-Implemented or scaffolded pieces currently include:
-- Terraform bootstrap, dev environment, and reusable modules under `infra/`.
-- Glue Lambdas for webhook verification, cost estimation, and issue-comment
-  handling under `infra/glue/`.
-- Shared TypeScript helpers for GitHub App auth, repo/spec access, secrets,
-  model selection, and budget conventions under `shared/`.
-- BA agent container scaffold under `agents/ba/`.
-- Scripts for GitHub App onboarding, product seeding, label seeding, and smoke
-  testing under `scripts/`.
-- GitHub Actions workflows for bootstrap, Terraform plan/apply, agent image
-  builds, and lightweight CI under `.github/workflows/`.
+The platform is feature-complete for the v1 happy path and deployed to the dev
+environment (`eu-west-1`), where it currently dogfoods on this repo
+(`lopeztech/agent-forge`) as its first target product.
 
-Development is still early-stage. The remaining role agents, shared state
-helpers, area-lock implementation, drift audit flow, full lifecycle Step
-Functions, and broader test coverage are not complete yet.
+Implemented and deployed:
+- All six role agents — BA, Developer, Test Engineer, Functional Tester,
+  Security Reviewer, PO — plus the Cost Estimator gate, under `agents/` and
+  `infra/glue/`.
+- Per-issue Step Function lifecycles for each role, EventBridge routing, the
+  API Gateway webhook ingress, and the six DynamoDB tables under `infra/`.
+- Shared TypeScript helpers (GitHub App auth, spec/repo access, model
+  selection, budget, area locks, rate limits, team memory, forensics, Slack,
+  metrics) under `shared/`.
+- Phases A–E: rate limiting, daily budget rollups + circuit breaker, the
+  area-lock sweeper queue, team memory + drift audit, nightly backlog
+  hydration, and the 30-day production approval gate.
+- Onboarding / seeding / smoke / status scripts under `scripts/`, and CI for
+  bootstrap, Terraform plan/apply, agent image builds, and tests.
+- 177 unit tests (`npm test`).
+
+Remaining work is hardening, not core features: exercising the back half of the
+pipeline (Test → Functional → Security → PO) end-to-end on live infra, broader
+integration coverage, and operational polish.
+
+**Model note:** the code currently pins **Opus 4.6**
+(`eu.anthropic.claude-opus-4-6-v1`, see `shared/models.ts`) for the PO and
+Dev-escalation tiers. The architecture/cost docs describe **Opus 4.7** as the
+target; 4.7 is not yet enabled on the dev Bedrock account, so 4.6 is the
+interim.
 
 ## Reference docs
 
