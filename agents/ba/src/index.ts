@@ -32,6 +32,7 @@ import {
   type BudgetTrip,
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
+import { emitRoleRunFinished } from "../../../shared/metrics/emit.ts";
 import { buildMemoryBlock } from "../../../shared/agent/memory-tool.ts";
 import { getLessons } from "../../../shared/state/team-memory.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
@@ -864,6 +865,15 @@ async function main(): Promise<void> {
     },
   });
   log({ msg: "recorded spend", cost_usd: baCostUsd });
+
+  // CloudWatch dashboard signal: success when BA expanded to
+  // state:cost-estimating; failure on either model-verdict park.
+  await emitRoleRunFinished({
+    role: ROLE,
+    productId: PRODUCT_ID,
+    status: parking ? "failed" : "succeeded",
+    costUsd: baCostUsd,
+  });
 
   // Safety: assert reported cost matches the pricing table.
   const recomputed = costUsd("sonnet-4-6", {

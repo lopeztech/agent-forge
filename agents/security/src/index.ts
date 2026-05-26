@@ -32,6 +32,7 @@ import {
   type BudgetTrip,
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
+import { emitRoleRunFinished } from "../../../shared/metrics/emit.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
   RECORD_LESSON_TOOL,
@@ -785,6 +786,19 @@ async function main(): Promise<void> {
         output_tokens: loop.usage.output_tokens,
         cost_usd: loop.costUsd,
       },
+    });
+
+    // CloudWatch dashboard signal: success when Security cleared the PR
+    // to PO; failure when the review blocked (kicked back below cap or
+    // capped) or the loop never produced a verdict.
+    await emitRoleRunFinished({
+      role: ROLE,
+      productId: PRODUCT_ID,
+      status:
+        capturedReport !== undefined && !isBlocking(capturedReport)
+          ? "succeeded"
+          : "failed",
+      costUsd: loop.costUsd,
     });
 
     const recomputed = costUsd("sonnet-4-6", {

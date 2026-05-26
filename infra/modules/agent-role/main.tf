@@ -118,6 +118,16 @@ data "aws_iam_policy_document" "task" {
     resources = values(var.dynamodb_table_arns)
   }
 
+  # Best-effort per-run metrics for the shared CloudWatch dashboard.
+  # PutMetricData only supports "*" resource scope.
+  statement {
+    sid = "PublishCloudWatchMetrics"
+    actions = [
+      "cloudwatch:PutMetricData",
+    ]
+    resources = ["*"]
+  }
+
   # PutEvents for future role-to-role signals. No-op today.
   dynamic "statement" {
     for_each = var.event_bus_arn != "" ? [1] : []

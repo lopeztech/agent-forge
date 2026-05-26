@@ -36,6 +36,7 @@ import {
   hashSpecTree,
   type SpecHashDiff,
 } from "../../../../shared/github/spec-hashes.ts";
+import { emitDriftAuditRun } from "../../../../shared/metrics/emit.ts";
 import {
   listDoneIssuesWithSpecHashes,
   type IssueState,
@@ -90,6 +91,12 @@ export async function handler(_event: ScheduledEvent): Promise<void> {
     issues_checked: totalIssuesChecked,
     issues_drifted: totalIssuesDrifted,
     issues_filed: totalIssuesFiled,
+  });
+
+  await emitDriftAuditRun({
+    checked: totalIssuesChecked,
+    drifted: totalIssuesDrifted,
+    filed: totalIssuesFiled,
   });
 }
 

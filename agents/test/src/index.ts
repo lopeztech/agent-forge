@@ -32,6 +32,7 @@ import {
   type BudgetTrip,
 } from "../../../shared/budget/caps.ts";
 import { forensicFooter, makeParkDumper } from "../../../shared/forensic/dump.ts";
+import { emitRoleRunFinished } from "../../../shared/metrics/emit.ts";
 import { kickbackToDev } from "../../../shared/agent/kickback.ts";
 import {
   RECORD_LESSON_TOOL,
@@ -885,6 +886,22 @@ async function main(): Promise<void> {
         output_tokens: loop.usage.output_tokens,
         cost_usd: loop.costUsd,
       },
+    });
+
+    // CloudWatch dashboard signal: success when tests pushed cleanly to
+    // the PR branch; failure on no-submit, finalize failure, kickback at
+    // cap. Below-cap kickbacks are a routed-back-to-Dev path, not a Test
+    // failure, but they're rare relative to clean passes and the
+    // simplification is worth it.
+    await emitRoleRunFinished({
+      role: ROLE,
+      productId: PRODUCT_ID,
+      status:
+        finalizeResult?.kind === "ok" &&
+        capturedSubmission?.outcome === "passed"
+          ? "succeeded"
+          : "failed",
+      costUsd: loop.costUsd,
     });
 
     const recomputed = costUsd("sonnet-4-6", {
