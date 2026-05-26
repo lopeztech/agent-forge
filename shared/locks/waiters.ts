@@ -200,6 +200,55 @@ export type RemoveWaiterOpts = {
   issueNumber: number;
 };
 
+// Read-only listing of every non-expired waiter for a product. Used by
+// the ops CLI's `status product` drill-down to surface the per-area
+// queue depth (oldest first within each area). Filters out TTL-expired
+// rows defensively (DDB's TTL purge runs within ~48h).
+export async function listWaitersForProduct(opts: {
+  tableName: string;
+  productId: string;
+  now?: Date;
+}): Promise<Waiter[]> {
+  const nowEpoch = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const out: Waiter[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb().send(
+      new QueryCommand({
+        TableName: opts.tableName,
+        KeyConditionExpression: "product_id = :p",
+        FilterExpression: "expires_at > :now",
+        ExpressionAttributeValues: {
+          ":p": opts.productId,
+          ":now": nowEpoch,
+        },
+        ScanIndexForward: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const item of r.Items ?? []) {
+      const parsed = parseAreaWaiterId(String(item["area_waiter_id"]));
+      if (!parsed) continue;
+      const w: Waiter = {
+        productId: opts.productId,
+        areaId: parsed.areaId,
+        createdAtIso: parsed.createdAtIso,
+        issueNumber: parsed.issueNumber,
+        repo: String(item["repo"] ?? ""),
+        expiresAt: Number(item["expires_at"] ?? 0),
+      };
+      if (item["delivery_id"] !== undefined) {
+        w.deliveryId = String(item["delivery_id"]);
+      }
+      out.push(w);
+    }
+    exclusiveStartKey = r.LastEvaluatedKey as
+      | Record<string, unknown>
+      | undefined;
+  } while (exclusiveStartKey);
+  return out;
+}
+
 // Idempotent: tolerates a missing row (no ConditionExpression). The
 // sweeper calls this after StartExecution succeeds; if two sweeper runs
 // race the same waiter, only one wins the SF start but both Delete are
