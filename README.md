@@ -17,7 +17,12 @@ This repo currently contains:
 - Glue Lambdas for webhook verification, cost estimation, and comment handling.
 - Shared TypeScript helpers for GitHub App auth, model selection, specs, and
   budget conventions.
-- A first BA agent container scaffold.
+- Six role containers for BA, Dev, Test, Functional, Security, and PO,
+  with the full label-driven pipeline wired in dev. Long-running
+  behaviours — nightly backlog hydration, weekly drift audit, and
+  per-(product, role) team-memory accumulation — are running on schedule.
+  A 30-day post-onboarding approval gate suppresses auto-merge while a
+  target repo's PR-accuracy is being observed.
 - Scripts for GitHub App onboarding, product seeding, label seeding, and smoke
   testing.
 - Operational docs in `docs/runbook.md`.

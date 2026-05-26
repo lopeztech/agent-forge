@@ -94,7 +94,7 @@ Apply a label (e.g. `state:idea`) to any issue. Within ~2s you should see a JSON
 
 ## Bootstrapping the BA agent on a target repo
 
-Once webhooks deliver, you still need three pieces in place before a `state:idea` label actually causes the BA Fargate task to run: the label vocabulary, a BA image in ECR, and an issue in the target repo to label.
+Once webhooks deliver, you still need three pieces in place before a `state:idea` label actually causes the agent chain to run: the label vocabulary, agent images in ECR, and an issue in the target repo to label.
 
 ### Step 1 — Seed the label vocabulary
 
@@ -106,14 +106,15 @@ AWS_PROFILE=agent-forge-dev AWS_REGION=eu-west-1 npm run seed:labels -- \
 
 Idempotent — re-runs only touch labels whose color/description drifted.
 
-### Step 2 — Build and push the BA image
+### Step 2 — Build and push the agent images
 
-The first apply creates an empty ECR repo. Push an image to it before triggering the BA task, otherwise Fargate fails with `CannotPullContainerError`.
+The first apply creates empty ECR repos. Push images before triggering the chain, otherwise Fargate fails with `CannotPullContainerError`.
 
 ```bash
-# Manually trigger the agent-images workflow against main:
+# Manually trigger the agent-images workflow against main.
+# The workflow matrix builds BA, Dev, Test, Functional, Security, and PO.
 gh workflow run agent-images.yml --ref main
-# or push any commit touching agents/ba/** to fire it automatically.
+# or push any commit touching agents/** or shared/** to fire it automatically.
 ```
 
 Watch:
@@ -149,11 +150,47 @@ aws logs tail --follow --region eu-west-1 \
 Within ~30s of applying the label you should see:
 - The Step Function execution start (visible in the AWS console at `output ba_state_machine_arn`).
 - The BA container's structured-JSON logs flow into the task log group.
-- A new comment on the issue from the writer App ("BA stub picked up this issue").
+- A new BA expansion comment on the issue from the writer App.
 - The label transition from `state:idea` to `state:cost-estimating`.
 - A row in `budget_ledger` for the run.
 
 If the task fails to start, check the Step Function execution's event view — `CannotPullContainerError` means Step 2 hasn't completed. `AccessDeniedException` on Secrets Manager or DynamoDB means an IAM scoping bug.
+
+---
+
+## Clearing `human-needed`
+
+`human-needed` means an agent intentionally parked the issue instead of
+guessing. Common causes:
+
+- BA found a spec conflict or could not map the issue to any declared area.
+- Cost Estimator failed, exceeded the hard per-issue cap, or needs a human
+  `/approve-cost`.
+- Dev/Test/Functional/Security/PO hit the per-issue budget cap or failed to
+  complete its tool loop.
+- Test, Functional, Security, or PO kicked back to Dev until `iter:3`, then
+  stopped at the attempt cap.
+- PO approved but `products.auto_merge` is false, so a human must merge.
+- PO approved with `products.auto_merge=true`, but the merge call failed due
+  to branch protection, stale head, missing merger installation, or a similar
+  repo condition.
+
+Recovery steps:
+
+1. Read the latest issue comment from the role that parked it. Most park
+   comments name the state transition, cap, or missing configuration.
+2. If the comment includes a forensic S3 URI, inspect that JSON object for the
+   role, run id, stop reason, and recent model/tool context.
+3. Fix the underlying cause: refine the issue/spec, add an `area:<name>` label,
+   update `.agent-forge/areas.yml`, approve/cancel cost, merge the PR, or
+   adjust the product row.
+4. Remove `human-needed`. If the issue should resume at a particular point,
+   also ensure the intended `state:*` label is present. For example, clearing
+   `human-needed` from an issue still labeled `state:ready` lets the next Dev
+   trigger or lock sweeper pick it up.
+
+Do not clear `human-needed` without reading the comment first; the label is
+the system's deliberate "I need a human decision" boundary.
 
 ---
 
