@@ -2,13 +2,13 @@
 //
 // Three outcomes per CLAUDE.md → Roles → Product Owner:
 //   - approve:      PR matches the issue's acceptance criteria + cited spec.
-//                   Slice F.1 posts a "recommend-merge" comment and parks
-//                   at human-needed for a human to actually merge (the
-//                   "first 30 days" approval-gate pattern). F.2 will
-//                   actually call the merger App.
+//                   The caller auto-merges through the merger App when
+//                   products.auto_merge=true; otherwise it posts a
+//                   "recommend-merge" comment and parks at human-needed for
+//                   a human to merge (the "first 30 days" approval gate).
 //   - kickback:     PR is missing something or got something wrong. Slice
-//                   F.1 parks at human-needed; F.2 will transition to
-//                   state:in-dev + increment iter:N for a re-run.
+//                   callers route this back to Dev by incrementing iter:N
+//                   and applying state:ready, unless already at iter:3 cap.
 //   - spec_ambig:   the spec itself is unclear about what "correct" means
 //                   here. Parks at human-needed regardless of slice
 //                   (architecture treats this as a category-3 immediate

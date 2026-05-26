@@ -1,8 +1,8 @@
 // SecurityReport: what submit_security_done returns.
 //
-// `outcome` is the gate. "clean" hands off to PO; anything else parks the
-// issue at human-needed (E.2 will replace the kickback path with a real
-// transition to state:in-dev + iter:N increment).
+// `outcome` is the gate. "clean" hands off to PO; blocking findings kick
+// back to Dev through the shared iter:N flow unless the issue is already at
+// the cap, where the caller parks at human-needed.
 //
 // `severity` is a tag for the worst finding. "info" never blocks; "high" or
 // "critical" always block (mapped from CLAUDE.md → "Blocking findings →
