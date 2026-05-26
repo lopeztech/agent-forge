@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  hasComplexityHighLabel,
+  hasComplexityLargeLabel,
   nextIterAttempt,
   parseIterLabel,
 } from "../shared/labels.ts";
@@ -59,22 +59,22 @@ describe("nextIterAttempt", () => {
   });
 });
 
-describe("hasComplexityHighLabel", () => {
-  it("true when complexity:high is present", () => {
+describe("hasComplexityLargeLabel", () => {
+  it("true when complexity:large is present", () => {
     assert.equal(
-      hasComplexityHighLabel([{ name: "state:ready" }, { name: "complexity:high" }]),
+      hasComplexityLargeLabel([{ name: "state:ready" }, { name: "complexity:large" }]),
       true,
     );
   });
 
-  it("false when only the other complexity tier labels are present", () => {
+  it("false when the old complexity:high name is present", () => {
     assert.equal(
-      hasComplexityHighLabel([{ name: "complexity:low" }, { name: "state:ready" }]),
+      hasComplexityLargeLabel([{ name: "complexity:high" }, { name: "state:ready" }]),
       false,
     );
   });
 
   it("false when label set is empty", () => {
-    assert.equal(hasComplexityHighLabel([]), false);
+    assert.equal(hasComplexityLargeLabel([]), false);
   });
 });

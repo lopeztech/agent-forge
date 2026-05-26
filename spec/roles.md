@@ -26,7 +26,7 @@ through GitHub issue label transitions — never direct agent-to-agent calls.
 - Claims the area, branches from `main`, implements against acceptance criteria
 - Opens a PR linking the issue
 - Escalates Sonnet → Opus on the final retry attempt
-- Default model: Sonnet 4.6; Opus 4.7 on attempt 3 or for `complexity:high`
+- Default model: Sonnet 4.6; Opus 4.7 on attempt 3 or for `complexity:large`
 
 ## 3. Test Engineer
 

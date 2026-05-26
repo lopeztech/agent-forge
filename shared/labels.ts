@@ -30,7 +30,7 @@ export const GAP_LABELS = {
 export const FLAG_LABELS = {
   techDebt: "tech-debt",
   securitySensitive: "security-sensitive",
-  complexityHigh: "complexity:high",
+  complexityLarge: "complexity:large",
 } as const;
 
 export function iterLabel(attempt: 1 | 2 | 3): `iter:${1 | 2 | 3}` {
@@ -55,14 +55,14 @@ export function parseIterLabel(
   return max;
 }
 
-// True iff the human-applied `complexity:high` flag is on the issue. This
+// True iff the human-applied `complexity:large` flag is on the issue. This
 // label overrides BA's complexity tag at the Dev tier-selection step — see
-// CLAUDE.md → Roles → Developer for the policy ("Opus on the final attempt
-// of the cap, or for issues labelled complexity:high").
-export function hasComplexityHighLabel(
+// docs/architecture.md → Roles → Developer for the policy ("Opus on the final
+// attempt of the cap, or for issues labelled complexity:large").
+export function hasComplexityLargeLabel(
   labels: ReadonlyArray<{ name: string }>,
 ): boolean {
-  return labels.some((l) => l.name === FLAG_LABELS.complexityHigh);
+  return labels.some((l) => l.name === FLAG_LABELS.complexityLarge);
 }
 
 // Picks the next iter:N attempt given the current one. Used by Test /
@@ -238,7 +238,7 @@ export const LABEL_VOCABULARY: readonly LabelDefinition[] = [
       "Touches auth, crypto, payments, or PII; Security Reviewer escalates to Opus",
   },
   {
-    name: FLAG_LABELS.complexityHigh,
+    name: FLAG_LABELS.complexityLarge,
     color: "ff6f1a",
     description:
       "Cross-cutting / perf-sensitive / novel; Dev escalates to Opus on first attempt",

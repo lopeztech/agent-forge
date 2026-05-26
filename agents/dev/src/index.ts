@@ -64,7 +64,7 @@ import {
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
   STATE_LABELS,
-  hasComplexityHighLabel,
+  hasComplexityLargeLabel,
   iterLabel,
   parseAreaLabels,
   parseIterLabel,
@@ -1014,10 +1014,10 @@ async function main(): Promise<void> {
     }
 
     // Tier driven by BA's complexity tag, with two overrides:
-    //   - complexity:high label (human override) → treat as "large"
+    //   - complexity:large label (human override) → treat as "large"
     //   - attempt >= 2 floors at Sonnet; attempt 3 always Opus (in tierForDev)
-    const complexityHigh = hasComplexityHighLabel(issueLabels);
-    const effectiveComplexity = complexityHigh ? "large" : baExpansion.complexity;
+    const complexityLarge = hasComplexityLargeLabel(issueLabels);
+    const effectiveComplexity = complexityLarge ? "large" : baExpansion.complexity;
     const tier: ModelTier = tierForDev({
       complexity: effectiveComplexity,
       attempt,
@@ -1026,7 +1026,7 @@ async function main(): Promise<void> {
       msg: "selected model tier",
       tier,
       complexity: baExpansion.complexity ?? "(unset)",
-      complexity_high_override: complexityHigh,
+      complexity_large_override: complexityLarge,
       effective_complexity: effectiveComplexity ?? "(unset)",
       attempt,
     });

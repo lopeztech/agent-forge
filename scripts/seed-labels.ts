@@ -29,7 +29,7 @@ import {
 //   gap:areas-incomplete — red (action required)
 //   tech-debt:*       — yellow
 //   security-sensitive — purple
-//   complexity:high   — orange
+//   complexity:large  — orange
 type Args = {
   repo: string;
   install: string;
