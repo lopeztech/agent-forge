@@ -16,6 +16,7 @@ import {
   DeleteCommand,
   DynamoDBDocumentClient,
   PutCommand,
+  QueryCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 const REGION = process.env.AWS_REGION ?? "eu-west-1";
@@ -251,4 +252,53 @@ function isConditionalCheckFailed(
       "name" in err &&
       err.name === "ConditionalCheckFailedException")
   );
+}
+
+// Read-only listing. Used by the ops CLI's `status product` drill-down to
+// surface which areas are currently held + who owns them. Filters out
+// rows whose TTL has effectively expired (DDB's TTL purge runs within
+// ~48h; this layer is defensive).
+export type HeldAreaLock = {
+  productId: string;
+  areaId: string;
+  ownerId: string;
+  acquiredAt: string;
+  expiresAt: number;
+};
+
+export async function listHeldAreaLocks(opts: {
+  tableName: string;
+  productId: string;
+  now?: Date;
+}): Promise<HeldAreaLock[]> {
+  const nowEpoch = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  const out: HeldAreaLock[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb().send(
+      new QueryCommand({
+        TableName: opts.tableName,
+        KeyConditionExpression: "product_id = :p",
+        FilterExpression: "expires_at > :now",
+        ExpressionAttributeValues: {
+          ":p": opts.productId,
+          ":now": nowEpoch,
+        },
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const item of r.Items ?? []) {
+      out.push({
+        productId: opts.productId,
+        areaId: String(item["area_id"] ?? ""),
+        ownerId: String(item["owner_id"] ?? ""),
+        acquiredAt: String(item["acquired_at"] ?? ""),
+        expiresAt: Number(item["expires_at"] ?? 0),
+      });
+    }
+    exclusiveStartKey = r.LastEvaluatedKey as
+      | Record<string, unknown>
+      | undefined;
+  } while (exclusiveStartKey);
+  return out;
 }

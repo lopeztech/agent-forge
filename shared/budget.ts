@@ -187,6 +187,55 @@ export async function getSpendBetweenUsd(
   return total;
 }
 
+export type SpendRow = SpendRecord & { ts: string; run_id: string };
+
+// Read-only listing of every budget_ledger row for one (product, issue).
+// Used by the ops CLI's `status pipeline` view to itemize spend per role
+// attempt. Sorted chronologically (SK ascending).
+export async function listSpendForIssue(
+  opts: GetIssueSpendOpts,
+): Promise<SpendRow[]> {
+  const issueNumberValue = Number(opts.issueNumber);
+  const out: SpendRow[] = [];
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const r = await ddb().send(
+      new QueryCommand({
+        TableName: opts.tableName,
+        KeyConditionExpression: "product_id = :p",
+        FilterExpression: "issue_number = :i",
+        ExpressionAttributeValues: {
+          ":p": opts.productId,
+          ":i": issueNumberValue,
+        },
+        ScanIndexForward: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }),
+    );
+    for (const item of r.Items ?? []) {
+      const tsRun = String(item["ts_run_id"] ?? "");
+      const hashIdx = tsRun.indexOf("#");
+      const ts = hashIdx > 0 ? tsRun.slice(0, hashIdx) : tsRun;
+      const runId = hashIdx > 0 ? tsRun.slice(hashIdx + 1) : "";
+      out.push({
+        product_id: String(item["product_id"] ?? ""),
+        issue_number: Number(item["issue_number"] ?? 0),
+        role: String(item["role"] ?? ""),
+        model: String(item["model"] ?? ""),
+        input_tokens: Number(item["input_tokens"] ?? 0),
+        cached_tokens: Number(item["cached_tokens"] ?? 0),
+        output_tokens: Number(item["output_tokens"] ?? 0),
+        cost_usd: Number(item["cost_usd"] ?? 0),
+        ts,
+        run_id: runId,
+        ...(item["note"] !== undefined ? { note: String(item["note"]) } : {}),
+      });
+    }
+    exclusiveStartKey = r.LastEvaluatedKey as Record<string, unknown> | undefined;
+  } while (exclusiveStartKey);
+  return out;
+}
+
 export type GetSpendTodayOpts = {
   tableName: string;
   productId: string;
