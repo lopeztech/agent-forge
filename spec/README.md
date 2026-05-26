@@ -5,8 +5,9 @@ the platform exists to do, who it's for, and what success looks like. It is
 read by the BA agent (and any humans triaging backlog) to ground backlog work
 in the product's purpose.
 
-Architecture details — components, infrastructure, conventions — live in the
-repo's top-level `CLAUDE.md`. Treat that as the engineering reference;
+Architecture details — components, infrastructure, conventions — live in
+`docs/architecture.md` (with `CLAUDE.md`/`AGENTS.md` as the lean agent
+guidance that links to it). Treat those as the engineering reference;
 this directory is the product reference.
 
 ## Mission
