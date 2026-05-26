@@ -48,6 +48,7 @@ import {
   dispatchRecordLesson,
 } from "../../../shared/agent/memory-tool.ts";
 import { getLessons } from "../../../shared/state/team-memory.ts";
+import { resolveTypecheckCommand } from "../../../shared/agent/typecheck.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -287,8 +288,12 @@ Recommended flow:
   1. list_directory + grep + read_file the affected paths under your locked
      areas. Don't guess about file contents — read them.
   2. write_file (or bash with sed/awk) to make the change.
-  3. bash to run the test command yourself (typically \`npm test\`,
-     \`pytest\`, etc. — derive from the project). Iterate until green.
+  3. bash to run the project's checks yourself: typecheck first if the project
+     has one (e.g. \`npm run typecheck\` — a change can pass tests but still
+     fail \`tsc --noEmit\`, which CI gates on), then the test command (typically
+     \`npm test\`, \`pytest\`, etc. — derive from the project). The finalize
+     wrapper re-runs both as the gate before opening the PR, so iterate until
+     both are green or it will bounce back to you.
   4. Call submit_done with a concise summary + PR title/body.
 
 Constraints:
@@ -917,6 +922,14 @@ async function main(): Promise<void> {
       msg: "resolved test_command",
       command: testCommand ?? "(none — finalize will skip tests)",
     });
+    const typecheckCommand = await resolveTypecheckCommand(
+      workdir.path,
+      product.typecheck_command,
+    );
+    log({
+      msg: "resolved typecheck_command",
+      command: typecheckCommand ?? "(none — finalize will skip typecheck)",
+    });
 
     // Attempt counter: read iter:N off the issue. Missing → first attempt,
     // we apply iter:1 below. Future kickback handlers (Test/Functional/etc.)
@@ -1047,6 +1060,7 @@ async function main(): Promise<void> {
           branchName,
           defaultBranch,
           commitMessage: submission.summary,
+          ...(typecheckCommand ? { typecheckCommand } : {}),
           ...(testCommand ? { testCommand } : {}),
           token,
           repo: REPO,

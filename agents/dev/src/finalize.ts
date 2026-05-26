@@ -104,6 +104,7 @@ export type FinalizeOpts = {
   branchName: string;
   defaultBranch: string;
   commitMessage: string;
+  typecheckCommand?: string;
   testCommand?: string;
   token: string; // GitHub installation token
   repo: string; // owner/name
@@ -146,8 +147,20 @@ export async function finalize(opts: FinalizeOpts): Promise<FinalizeResult> {
     }
   }
 
-  // 3. If the product has a test command, run it. Failure returns to the
-  //    agent loop (terminate=false on submit_done) so they can investigate.
+  // 3. Run the project's checks as the pre-PR gate. Typecheck first — a change
+  //    can pass `npm test` but fail `tsc --noEmit`, which the repo's CI gates
+  //    on — then the test command. Any failure returns to the agent loop
+  //    (terminate=false on submit_done) so they can investigate.
+  if (opts.typecheckCommand) {
+    const tcRun = await runBashRaw(opts.typecheckCommand, opts.workdir, 10 * 60_000);
+    if (tcRun.exitCode !== 0) {
+      const out = (tcRun.stdout + "\n" + tcRun.stderr).trim();
+      return {
+        kind: "tests_failed",
+        output: `Typecheck failed (\`${opts.typecheckCommand}\`):\n${out}`.slice(0, 4000),
+      };
+    }
+  }
   if (opts.testCommand) {
     const testRun = await runBashRaw(opts.testCommand, opts.workdir, 10 * 60_000);
     if (testRun.exitCode !== 0) {

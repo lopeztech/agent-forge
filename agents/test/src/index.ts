@@ -40,6 +40,7 @@ import {
   dispatchRecordLesson,
 } from "../../../shared/agent/memory-tool.ts";
 import { getLessons } from "../../../shared/state/team-memory.ts";
+import { resolveTypecheckCommand } from "../../../shared/agent/typecheck.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -176,7 +177,11 @@ Recommended flow:
   4. list_directory the existing tests/ folder (or framework-equivalent) to
      learn the convention.
   5. write_file new test files covering each acceptance criterion.
-  6. bash to run the test command. Iterate until green.
+  6. bash to run the project's checks. If the project has a typecheck script
+     (e.g. \`npm run typecheck\`), run it too — a test file can pass
+     \`node --test\` at runtime but still fail \`tsc --noEmit\`, which CI gates
+     on. Then run the test command. The finalize wrapper re-runs both as the
+     gate, so iterate until both are green or it will bounce back to you.
   7. Call submit_tests_done with outcome="passed", a brief summary, and
      which acceptance criteria each test covers.
 
@@ -655,6 +660,11 @@ async function main(): Promise<void> {
 
     const testCommand = await resolveTestCommand(workdir.path, product.test_command);
     log({ msg: "resolved test_command", command: testCommand ?? "(none)" });
+    const typecheckCommand = await resolveTypecheckCommand(
+      workdir.path,
+      product.typecheck_command,
+    );
+    log({ msg: "resolved typecheck_command", command: typecheckCommand ?? "(none)" });
 
     const lessons = await getLessons({
       tableName: TEAM_MEMORY_TABLE,
@@ -699,6 +709,7 @@ async function main(): Promise<void> {
           workdir: wd,
           branchName,
           commitMessage: submission.summary,
+          ...(typecheckCommand ? { typecheckCommand } : {}),
           ...(testCommand ? { testCommand } : {}),
         });
         finalizeResult = f;
