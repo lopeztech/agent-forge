@@ -87,6 +87,17 @@ export type ProductConfig = {
   // Slack approval gate before merge, not autonomous merge"). Flip to true
   // per-product after observed merge accuracy is acceptable.
   auto_merge?: boolean;
+  // Phase E approval gate. ISO timestamp; while now < this, PO behaves as
+  // if auto_merge=false regardless of the flag's actual value, and posts
+  // a Slack notification (when slack_webhook_url is set) instead of
+  // silently parking at human-needed. Onboarding (scripts/seed-product.ts)
+  // writes `now + 30d` per the 2026-05-25 design decision. To bypass the
+  // gate early, set to a past ISO (or remove the field).
+  approval_gate_until?: string;
+  // Slack incoming-webhook URL the gate posts to on verdict=approve while
+  // active. Unset = gate still skips auto-merge but no Slack notification
+  // is sent.
+  slack_webhook_url?: string;
   updated_at?: string;
 };
 

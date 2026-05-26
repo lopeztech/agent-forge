@@ -58,6 +58,7 @@ import {
 } from "../../../shared/github/repo.ts";
 import { readSpecTree, type SpecReadResult } from "../../../shared/github/spec.ts";
 import { hashSpecTree } from "../../../shared/github/spec-hashes.ts";
+import { isGateActive, notifySlack } from "../../../shared/slack/notify.ts";
 import {
   GAP_LABELS,
   HUMAN_NEEDED_LABEL,
@@ -310,20 +311,83 @@ function commentPoApprove(args: {
   modelId: string;
   turns: number;
   report: POReport;
+  gateActive?: boolean;
+  gateUntil?: string;
 }): string {
+  const gateLine = args.gateActive
+    ? `Parking at \`${HUMAN_NEEDED_LABEL}\`. The **30-day approval gate** is ` +
+      `active for this product${args.gateUntil ? ` (expires ${args.gateUntil})` : ""} — ` +
+      `auto-merge is suppressed during the confidence-building window even if ` +
+      `\`products.auto_merge = true\`. A human should merge the PR and ` +
+      "transition this issue to `state:done`. The team's Slack channel has " +
+      "been notified (when `products.slack_webhook_url` is configured)."
+    : `Parking at \`${HUMAN_NEEDED_LABEL}\`. The PR is **not auto-merged** ` +
+      "because `products.auto_merge` is false for this product. A human should " +
+      "merge the PR and transition this issue to `state:done`.";
+  const flipLine = args.gateActive
+    ? "After the gate expires, `products.auto_merge = true` lets PO merge directly on `approve`."
+    : "Flip `products.auto_merge = true` for this product to let PO merge directly on `approve`.";
   return [
     `## PO review: RECOMMEND APPROVE (Slice F.1, run \`${args.runId}\`, ${args.modelId}, ${args.turns} turn${args.turns === 1 ? "" : "s"})`,
     "",
     args.report.summary,
     "",
     args.report.details ? "### Reasoning\n\n" + args.report.details + "\n" : "",
-    `Parking at \`${HUMAN_NEEDED_LABEL}\`. Per the "first 30 days" approval ` +
-      "gate (CLAUDE.md → Human gates), the PR is **not auto-merged**. A human " +
-      "should merge the PR and transition this issue to `state:done`.",
+    gateLine,
     "",
-    "Flip `products.auto_merge = true` for this product to let PO merge " +
-      "directly on `approve`.",
+    flipLine,
   ].filter((s) => s !== "").join("\n");
+}
+
+function buildSlackApprovalBlocks(args: {
+  repo: string;
+  issueNumber: number;
+  issueTitle: string;
+  report: POReport;
+  gateActive: boolean;
+  gateUntil?: string;
+}): Array<Record<string, unknown>> {
+  const issueUrl = `https://github.com/${args.repo}/issues/${args.issueNumber}`;
+  const gateLine = args.gateActive
+    ? `:lock: 30-day approval gate active${args.gateUntil ? ` (until ${args.gateUntil})` : ""}`
+    : ":unlock: approval gate inactive";
+  return [
+    {
+      type: "header",
+      text: { type: "plain_text", text: `agent-forge: recommend merge #${args.issueNumber}` },
+    },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*${args.issueTitle}*\n${issueUrl}\n\n${args.report.summary}`,
+      },
+    },
+    ...(args.report.details
+      ? [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text:
+                "*Reasoning*\n" +
+                args.report.details.slice(0, 1500) +
+                (args.report.details.length > 1500 ? "…" : ""),
+            },
+          },
+        ]
+      : []),
+    {
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: gateLine },
+        {
+          type: "mrkdwn",
+          text: "Merge directly on GitHub. State transition is manual until the gate expires.",
+        },
+      ],
+    },
+  ];
 }
 
 function commentPoMerged(args: {
@@ -838,12 +902,28 @@ async function main(): Promise<void> {
         });
       }
 
-      // F.2.a: if products.auto_merge is true, mint a merger-App token and
-      // attempt the actual merge. On success → state:done. On failure or
-      // misconfig → park at human-needed with the failure reason in the
-      // comment. If auto_merge is false (default), fall back to F.1
-      // behavior — post a recommend-approve comment and park.
-      if (product.auto_merge === true) {
+      // Phase E: 30-day approval gate. While active, force auto_merge off
+      // regardless of the product's flag — a human must merge through the
+      // first 30 days to establish PR-accuracy confidence. After the gate
+      // expires (`approval_gate_until` in the past or unset), auto_merge
+      // takes effect as configured.
+      const gateActive = isGateActive(product.approval_gate_until);
+      const autoMergeAllowed = product.auto_merge === true && !gateActive;
+      log({
+        msg: "approval gate check",
+        gate_active: gateActive,
+        approval_gate_until: product.approval_gate_until ?? "(unset)",
+        auto_merge_configured: product.auto_merge === true,
+        auto_merge_allowed: autoMergeAllowed,
+      });
+
+      // F.2.a: if products.auto_merge is true (and the approval gate isn't
+      // active), mint a merger-App token and attempt the actual merge. On
+      // success → state:done. On failure or misconfig → park at human-needed
+      // with the failure reason in the comment. If auto_merge is false (or
+      // gate-suppressed), fall back to F.1 behavior — post a
+      // recommend-approve comment and park.
+      if (autoMergeAllowed) {
         const mergeResult = await tryAutoMerge({
           ghOpts,
           product,
@@ -922,8 +1002,37 @@ async function main(): Promise<void> {
             modelId: model.bedrockModelId,
             turns: loop.turns,
             report: capturedReport,
+            gateActive,
+            ...(product.approval_gate_until ? { gateUntil: product.approval_gate_until } : {}),
           }),
         );
+        // Phase E: notify Slack so the team sees the recommend-merge in
+        // their channel of choice. Only fires when the webhook is
+        // configured; gate-active runs still post even if auto_merge was
+        // off, so the channel sees every recommendation during the
+        // confidence-building window.
+        if (product.slack_webhook_url) {
+          const slackResult = await notifySlack(product.slack_webhook_url, {
+            text: `agent-forge PO recommends merging issue #${ISSUE_NUMBER} in ${REPO}`,
+            blocks: buildSlackApprovalBlocks({
+              repo: REPO,
+              issueNumber: ISSUE_NUMBER,
+              issueTitle: issue.title,
+              report: capturedReport,
+              gateActive,
+              ...(product.approval_gate_until ? { gateUntil: product.approval_gate_until } : {}),
+            }),
+          });
+          if (!slackResult.ok) {
+            log({
+              msg: "slack notify failed (non-fatal)",
+              status: slackResult.status,
+              body: slackResult.body,
+            });
+          } else {
+            log({ msg: "slack notified", status: slackResult.status });
+          }
+        }
         await transitionLabel(
           ghOpts,
           REPO,
