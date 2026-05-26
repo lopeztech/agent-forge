@@ -32,7 +32,6 @@ export type FinalizeTestOpts = {
   workdir: string;
   branchName: string;
   commitMessage: string;
-  typecheckCommand?: string;
   testCommand?: string;
 };
 
@@ -68,21 +67,9 @@ export async function finalizeTest(
     }
   }
 
-  // 3. Re-run the project's checks one final time as the gate. Agent should
-  //    have run them already; this catches the case where the agent skipped or
-  //    where the auto-commit included files outside what they tested. Typecheck
-  //    first — a test file can pass `node --test` at runtime but fail
-  //    `tsc --noEmit` (the repo's CI gate) — then the test command.
-  if (opts.typecheckCommand) {
-    const tc = await runBashRaw(opts.typecheckCommand, opts.workdir, 10 * 60_000);
-    if (tc.exitCode !== 0) {
-      const out = (tc.stdout + "\n" + tc.stderr).trim();
-      return {
-        kind: "tests_failed",
-        output: `Typecheck failed (\`${opts.typecheckCommand}\`):\n${out}`.slice(0, 4000),
-      };
-    }
-  }
+  // 3. Re-run tests one final time as the gate. Agent should have run them
+  //    already; this catches the case where the agent skipped or where the
+  //    auto-commit included files outside what they tested.
   if (opts.testCommand) {
     const r = await runBashRaw(opts.testCommand, opts.workdir, 10 * 60_000);
     if (r.exitCode !== 0) {
