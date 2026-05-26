@@ -50,7 +50,13 @@ For the product and role-level spec, see:
 
 - `spec/README.md`
 - `spec/roles.md`
-- `CLAUDE.md`
+
+For the engineering reference, see:
+
+- `CLAUDE.md` / `AGENTS.md` — lean agent guidance (mission, handoff protocol, conventions)
+- `docs/architecture.md` — topology, AWS components, roles, concurrency, failure handling
+- `docs/cost-model.md` — spend model and budget circuit breaker
+- `docs/decisions.md` — architecture decision log
 
 ## Prerequisites
 

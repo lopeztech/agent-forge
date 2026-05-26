@@ -1,8 +1,8 @@
 # Contributing
 
 agent-forge is early-stage infrastructure software. Keep changes small,
-reviewable, and aligned with the architecture in `CLAUDE.md` and the product
-spec in `spec/`.
+reviewable, and aligned with the architecture in `docs/architecture.md`
+(summarized in `CLAUDE.md`) and the product spec in `spec/`.
 
 ## Setup
 
