@@ -92,6 +92,43 @@ export async function postComment(
   return (await r.json()) as { id: number; html_url: string };
 }
 
+export type IssueListItem = {
+  number: number;
+  title: string;
+  body: string | null;
+  state: "open" | "closed";
+  html_url: string;
+  labels: Array<{ name: string } | string>;
+};
+
+// Lists issues for a repo. Default state=open, default per_page=100, paginates
+// up to maxPages (default 5 = 500 issues, plenty for v1). PRs are surfaced by
+// GitHub through this endpoint too — filter them out with `issue.pull_request`
+// if the caller cares.
+export async function listIssues(
+  opts: RequestOptions,
+  repo: string,
+  args: { state?: "open" | "closed" | "all"; maxPages?: number } = {},
+): Promise<IssueListItem[]> {
+  const state = args.state ?? "open";
+  const maxPages = args.maxPages ?? 5;
+  const all: IssueListItem[] = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const r = await ghOrThrow(
+      opts,
+      "GET",
+      `/repos/${repo}/issues?state=${state}&per_page=100&page=${page}`,
+    );
+    const items = (await r.json()) as Array<
+      IssueListItem & { pull_request?: unknown }
+    >;
+    const issuesOnly = items.filter((i) => !("pull_request" in i && i.pull_request));
+    all.push(...issuesOnly);
+    if (items.length < 100) break;
+  }
+  return all;
+}
+
 export async function createIssue(
   opts: RequestOptions,
   repo: string,
