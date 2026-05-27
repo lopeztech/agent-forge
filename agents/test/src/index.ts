@@ -41,6 +41,7 @@ import {
 } from "../../../shared/agent/memory-tool.ts";
 import { getLessons } from "../../../shared/state/team-memory.ts";
 import { resolveTypecheckCommand } from "../../../shared/agent/typecheck.ts";
+import { ensureDependencies } from "../../../shared/agent/install-deps.ts";
 import {
   buildReadToolDefinitions,
   dispatchReadTool,
@@ -649,6 +650,21 @@ async function main(): Promise<void> {
         name: `agent-forge-${ROLE}[bot]`,
         email: `${ROLE}@agent-forge-${ENV}.local`,
       },
+    });
+
+    // Install dependencies deterministically (npm ci with a --legacy-peer-deps
+    // fallback) before the model loop + finalize gate, so the suite runs
+    // against a working node_modules rather than the model's improvised install.
+    const install = await ensureDependencies({
+      workdir: workdir.path,
+      ...(product.install_command ? { configured: product.install_command } : {}),
+    });
+    log({
+      msg: "ensured dependencies",
+      ran: install.ran,
+      ok: install.ok,
+      command_used: install.commandUsed ?? "(none)",
+      attempts: install.attempts,
     });
 
     const specPath = product.spec_path ?? "spec/";
