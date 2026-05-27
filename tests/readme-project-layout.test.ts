@@ -14,7 +14,6 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
 import { describe, it } from "node:test";
 
 const README = readFileSync(new URL("../README.md", import.meta.url), "utf8");
@@ -222,45 +221,13 @@ describe("README Project layout section (issue #86)", () => {
     }
   });
 
-  // AC5: Only README.md was modified in the Dev commit that introduced the section.
-  // We find that commit by searching for the one that added "## Project layout"
-  // to README.md, then verify it touched no other files.
-  it("only README.md was modified in the commit that introduced the Project layout section", () => {
-    const repoRoot = new URL("..", import.meta.url).pathname;
-
-    let devCommit: string;
-    try {
-      // Find the commit that introduced "## Project layout" into README.md
-      devCommit = execSync(
-        'git log -1 --format="%H" -G "## Project layout" -- README.md',
-        { encoding: "utf8", cwd: repoRoot },
-      ).trim();
-    } catch {
-      // git unavailable — skip
-      return;
-    }
-
-    if (!devCommit) {
-      assert.fail(
-        "Could not find a commit that introduced '## Project layout' in README.md",
-      );
-    }
-
-    // List all files changed in that commit
-    const changedFiles = execSync(
-      `git diff-tree --no-commit-id -r --name-only ${devCommit}`,
-      { encoding: "utf8", cwd: repoRoot },
-    )
-      .trim()
-      .split("\n")
-      .filter((f) => f.trim().length > 0);
-
-    assert.deepEqual(
-      changedFiles,
-      ["README.md"],
-      `The Dev commit (${devCommit.slice(0, 8)}) must only modify README.md, but found: ${changedFiles.join(", ")}`,
-    );
-  });
+  // Note: AC5 ("only README.md modified") is a PR-scope concern enforced by
+  // review + the Security role's scope check, not a unit test. A prior
+  // git-archaeology test here (git log -G + git diff-tree) was removed: it
+  // passed the agent's finalize gate (Fargate clones at --depth=20) but failed
+  // in CI, where actions/checkout defaults to a depth-1 grafted checkout with
+  // no parent, so the "introducing commit" resolved to HEAD and diff-tree
+  // listed the whole tree. Tests must not depend on clone depth / git history.
 
   // Structural: existing README sections are preserved
   it("preserves all pre-existing top-level README sections", () => {
