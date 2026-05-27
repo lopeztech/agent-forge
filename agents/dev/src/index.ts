@@ -49,6 +49,7 @@ import {
 } from "../../../shared/agent/memory-tool.ts";
 import { getLessons } from "../../../shared/state/team-memory.ts";
 import { resolveTypecheckCommand } from "../../../shared/agent/typecheck.ts";
+import { ensureDependencies } from "../../../shared/agent/install-deps.ts";
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import { readAreasFile } from "../../../shared/github/areas.ts";
 import {
@@ -881,6 +882,22 @@ async function main(): Promise<void> {
       branch: branchName,
       default_branch: defaultBranch,
       resumed,
+    });
+
+    // 2b. Install dependencies deterministically (npm ci, with a
+    //     --legacy-peer-deps fallback for repos whose strict npm ci ERESOLVEs)
+    //     so the model and the finalize gate both run against a working
+    //     node_modules. Don't leave this to the model improvising npm commands.
+    const install = await ensureDependencies({
+      workdir: workdir.path,
+      ...(product.install_command ? { configured: product.install_command } : {}),
+    });
+    log({
+      msg: "ensured dependencies",
+      ran: install.ran,
+      ok: install.ok,
+      command_used: install.commandUsed ?? "(none)",
+      attempts: install.attempts,
     });
 
     // 3. Read BA expansion + spec for context.

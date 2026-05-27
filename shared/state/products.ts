@@ -51,6 +51,12 @@ export type ProductConfig = {
   // package.json declares a `typecheck` script, otherwise no-op. Catches
   // changes that pass tests but fail the repo's `tsc --noEmit` CI gate.
   typecheck_command?: string;
+  // Shell command Dev/Test run once after cloning to install dependencies,
+  // before the model loop + finalize gate. Runs verbatim (no fallback) when
+  // set; otherwise an npm fallback chain (`npm ci` → `--legacy-peer-deps`) runs
+  // for package.json repos. Stops a repo whose strict `npm ci` fails (peer
+  // conflicts) from leaving a broken node_modules that fails the whole suite.
+  install_command?: string;
   // Per-issue hard spend cap in USD across all attempts (Dev role). Sum of
   // budget_ledger.cost_usd for this issue beyond this value parks the issue
   // at human-needed before the next model call. Default 12 USD per CLAUDE.md
