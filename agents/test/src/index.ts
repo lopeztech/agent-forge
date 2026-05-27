@@ -399,6 +399,16 @@ function commentTestFailed(args: {
     lines.push("```");
     lines.push(f.output);
     lines.push("```");
+  } else if (f.kind === "checks_timed_out") {
+    lines.push(
+      `A finalize check timed out after ${f.timeoutSeconds}s (slow or hanging ` +
+        "suite — not a defect in the tests). Consider a change-scoped " +
+        "`test_command` (via `$AGENT_FORGE_BASE_REF`) or a larger " +
+        "`test_timeout_seconds` for this product.\n",
+    );
+    lines.push("```");
+    lines.push(f.output);
+    lines.push("```");
   } else if (f.kind === "push_failed") {
     lines.push("git push failed:\n");
     lines.push("```");
@@ -528,6 +538,14 @@ function handleFinalizeResult(
           f.output,
         is_error: true,
         terminate: false,
+      };
+    case "checks_timed_out":
+      // Environmental (slow/hanging suite); re-running won't help — park.
+      return {
+        tool_use_id: callId,
+        content: `${f.output}\n\nParking — re-running won't help.`,
+        is_error: true,
+        terminate: true,
       };
     case "push_failed":
       return {
@@ -729,6 +747,9 @@ async function main(): Promise<void> {
           commitMessage: submission.summary,
           ...(typecheckCommand ? { typecheckCommand } : {}),
           ...(testCommand ? { testCommand } : {}),
+          ...(product.test_timeout_seconds
+            ? { testTimeoutSeconds: product.test_timeout_seconds }
+            : {}),
         });
         finalizeResult = f;
         return handleFinalizeResult(call.id, f);

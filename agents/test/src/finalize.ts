@@ -7,6 +7,10 @@
 // no PR-body composition.
 
 import { runBashRaw } from "../../../shared/agent/write-tools.ts";
+import {
+  runCheck,
+  DEFAULT_CHECK_TIMEOUT_SECONDS,
+} from "../../../shared/agent/checks.ts";
 
 export type SetupTestWorkdirOpts = {
   workdir: string;
@@ -34,12 +38,15 @@ export type FinalizeTestOpts = {
   commitMessage: string;
   typecheckCommand?: string;
   testCommand?: string;
+  // Per-product cap for the typecheck + test commands. Defaults to 600s.
+  testTimeoutSeconds?: number;
 };
 
 export type FinalizeTestResult =
   | { kind: "ok"; pushedHead: string }
   | { kind: "no_changes" }
   | { kind: "tests_failed"; output: string }
+  | { kind: "checks_timed_out"; output: string; timeoutSeconds: number }
   | { kind: "push_failed"; output: string };
 
 export async function finalizeTest(
@@ -73,21 +80,28 @@ export async function finalizeTest(
   //    where the auto-commit included files outside what they tested. Typecheck
   //    first — a test file can pass `node --test` at runtime but fail
   //    `tsc --noEmit` (the repo's CI gate) — then the test command.
-  if (opts.typecheckCommand) {
-    const tc = await runBashRaw(opts.typecheckCommand, opts.workdir, 10 * 60_000);
-    if (tc.exitCode !== 0) {
-      const out = (tc.stdout + "\n" + tc.stderr).trim();
+  const timeoutSeconds = opts.testTimeoutSeconds ?? DEFAULT_CHECK_TIMEOUT_SECONDS;
+  for (const [label, command] of [
+    ["Typecheck", opts.typecheckCommand],
+    ["Tests", opts.testCommand],
+  ] as const) {
+    if (!command) continue;
+    const outcome = await runCheck({
+      label,
+      command,
+      workdir: opts.workdir,
+      timeoutSeconds,
+      baseRef: "origin/HEAD",
+    });
+    if (outcome.kind === "timed_out") {
       return {
-        kind: "tests_failed",
-        output: `Typecheck failed (\`${opts.typecheckCommand}\`):\n${out}`.slice(0, 4000),
+        kind: "checks_timed_out",
+        output: outcome.output,
+        timeoutSeconds: outcome.timeoutSeconds,
       };
     }
-  }
-  if (opts.testCommand) {
-    const r = await runBashRaw(opts.testCommand, opts.workdir, 10 * 60_000);
-    if (r.exitCode !== 0) {
-      const out = (r.stdout + "\n" + r.stderr).trim();
-      return { kind: "tests_failed", output: out.slice(0, 4000) };
+    if (outcome.kind === "failed") {
+      return { kind: "tests_failed", output: outcome.output };
     }
   }
 

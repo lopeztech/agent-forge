@@ -57,6 +57,13 @@ export type ProductConfig = {
   // for package.json repos. Stops a repo whose strict `npm ci` fails (peer
   // conflicts) from leaving a broken node_modules that fails the whole suite.
   install_command?: string;
+  // Wall-clock cap (seconds) for each finalize check (typecheck, test command),
+  // run by Dev/Test before opening/updating the PR. Default 600. A check that
+  // exceeds this is treated as a slow/hanging suite: the issue parks at
+  // human-needed with a clear message instead of the agent looping (which just
+  // burns the per-attempt cap). Raise for legitimately slow suites, or pair
+  // with a change-scoped test_command (see $AGENT_FORGE_BASE_REF).
+  test_timeout_seconds?: number;
   // Per-issue hard spend cap in USD across all attempts (Dev role). Sum of
   // budget_ledger.cost_usd for this issue beyond this value parks the issue
   // at human-needed before the next model call. Default 12 USD per CLAUDE.md

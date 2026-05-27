@@ -6,6 +6,10 @@
 // auditable in one place.
 
 import { runBashRaw, type BashRunResult } from "../../../shared/agent/write-tools.ts";
+import {
+  runCheck,
+  DEFAULT_CHECK_TIMEOUT_SECONDS,
+} from "../../../shared/agent/checks.ts";
 
 const API = "https://api.github.com";
 
@@ -106,6 +110,8 @@ export type FinalizeOpts = {
   commitMessage: string;
   typecheckCommand?: string;
   testCommand?: string;
+  // Per-product cap for the typecheck + test commands. Defaults to 600s.
+  testTimeoutSeconds?: number;
   token: string; // GitHub installation token
   repo: string; // owner/name
   userAgent: string;
@@ -117,6 +123,7 @@ export type FinalizeResult =
   | { kind: "ok"; prNumber: number; prUrl: string }
   | { kind: "no_changes" }
   | { kind: "tests_failed"; output: string }
+  | { kind: "checks_timed_out"; output: string; timeoutSeconds: number }
   | { kind: "push_failed"; output: string }
   | { kind: "pr_failed"; status: number; body: string };
 
@@ -151,21 +158,29 @@ export async function finalize(opts: FinalizeOpts): Promise<FinalizeResult> {
   //    can pass `npm test` but fail `tsc --noEmit`, which the repo's CI gates
   //    on — then the test command. Any failure returns to the agent loop
   //    (terminate=false on submit_done) so they can investigate.
-  if (opts.typecheckCommand) {
-    const tcRun = await runBashRaw(opts.typecheckCommand, opts.workdir, 10 * 60_000);
-    if (tcRun.exitCode !== 0) {
-      const out = (tcRun.stdout + "\n" + tcRun.stderr).trim();
+  const timeoutSeconds = opts.testTimeoutSeconds ?? DEFAULT_CHECK_TIMEOUT_SECONDS;
+  const baseRef = `origin/${opts.defaultBranch}`;
+  for (const [label, command] of [
+    ["Typecheck", opts.typecheckCommand],
+    ["Tests", opts.testCommand],
+  ] as const) {
+    if (!command) continue;
+    const outcome = await runCheck({
+      label,
+      command,
+      workdir: opts.workdir,
+      timeoutSeconds,
+      baseRef,
+    });
+    if (outcome.kind === "timed_out") {
       return {
-        kind: "tests_failed",
-        output: `Typecheck failed (\`${opts.typecheckCommand}\`):\n${out}`.slice(0, 4000),
+        kind: "checks_timed_out",
+        output: outcome.output,
+        timeoutSeconds: outcome.timeoutSeconds,
       };
     }
-  }
-  if (opts.testCommand) {
-    const testRun = await runBashRaw(opts.testCommand, opts.workdir, 10 * 60_000);
-    if (testRun.exitCode !== 0) {
-      const out = (testRun.stdout + "\n" + testRun.stderr).trim();
-      return { kind: "tests_failed", output: out.slice(0, 4000) };
+    if (outcome.kind === "failed") {
+      return { kind: "tests_failed", output: outcome.output };
     }
   }
 
