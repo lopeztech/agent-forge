@@ -481,6 +481,15 @@ function handleFinalizeResult(
         is_error: true,
         terminate: false,
       };
+    case "checks_timed_out":
+      // A timeout is environmental (slow/hanging suite), not something the
+      // agent can fix by re-running — terminate and park instead of looping.
+      return {
+        tool_use_id: callId,
+        content: `${f.output}\n\nParking — re-running won't help.`,
+        is_error: true,
+        terminate: true,
+      };
     case "push_failed":
       // Infra-level failure; don't burn more agent turns trying to recover.
       return {
@@ -641,6 +650,16 @@ function commentFinalizeFailed(args: {
     );
   } else if (f.kind === "tests_failed") {
     lines.push("Tests failed during finalize:\n");
+    lines.push("```");
+    lines.push(f.output);
+    lines.push("```");
+  } else if (f.kind === "checks_timed_out") {
+    lines.push(
+      `A finalize check timed out after ${f.timeoutSeconds}s (slow or hanging ` +
+        "suite — not a defect in the change). Consider a change-scoped " +
+        "`test_command` (via `$AGENT_FORGE_BASE_REF`) or a larger " +
+        "`test_timeout_seconds` for this product.\n",
+    );
     lines.push("```");
     lines.push(f.output);
     lines.push("```");
@@ -1081,6 +1100,9 @@ async function main(): Promise<void> {
           commitMessage: submission.summary,
           ...(typecheckCommand ? { typecheckCommand } : {}),
           ...(testCommand ? { testCommand } : {}),
+          ...(product.test_timeout_seconds
+            ? { testTimeoutSeconds: product.test_timeout_seconds }
+            : {}),
           token,
           repo: REPO,
           userAgent: USER_AGENT,
