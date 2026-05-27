@@ -17,7 +17,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Full history: the test suite runs here, and the agent finalize gate
+      # clones target repos at --depth=20. A depth-1 grafted checkout (the
+      # default) made a git-history-based test pass the gate but fail CI
+      # (HEAD has no parent → diff resolved to the whole tree). Fetching full
+      # history makes CI's git env a superset of the agent clone, removing
+      # that gate-vs-CI divergence. See memory: finalize-clone-depth-vs-ci.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
