@@ -9,6 +9,18 @@ functional verification, security review, and product-owner approval.
 The platform lives in this repository. Target products live in separate GitHub
 repositories and connect through GitHub App installations.
 
+## Project layout
+
+| Directory | Purpose |
+|-----------|---------|
+| `infra/` | Terraform modules, environment configs, bootstrap state, and glue Lambdas for AWS infrastructure. |
+| `agents/` | Role-specialized agent containers (BA, Dev, Test, Functional, Security, PO). |
+| `shared/` | Shared TypeScript helpers — GitHub App auth, model selection, budget, labels, and state utilities. |
+| `scripts/` | Operational scripts for GitHub App onboarding, product seeding, label seeding, and smoke testing. |
+| `spec/` | Product specification: mission, roles, non-goals, and success metrics. |
+| `docs/` | Engineering reference: architecture, cost model, decision log, and operational runbook. |
+| `tests/` | Unit and integration tests for shared helpers, agent plans, and platform behaviour. |
+
 ## Current Shape
 
 This repo currently contains:
