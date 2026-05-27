@@ -222,25 +222,43 @@ describe("README Project layout section (issue #86)", () => {
     }
   });
 
-  // AC5: Only README.md was modified in the PR (checked via git diff)
-  it("only README.md was modified in the PR", () => {
-    let changedFiles: string;
+  // AC5: Only README.md was modified in the Dev commit that introduced the section.
+  // We find that commit by searching for the one that added "## Project layout"
+  // to README.md, then verify it touched no other files.
+  it("only README.md was modified in the commit that introduced the Project layout section", () => {
+    const repoRoot = new URL("..", import.meta.url).pathname;
+
+    let devCommit: string;
     try {
-      // Get files changed in the most recent commit
-      changedFiles = execSync("git diff HEAD~1..HEAD --name-only", {
-        encoding: "utf8",
-        cwd: new URL("..", import.meta.url).pathname,
-      }).trim();
+      // Find the commit that introduced "## Project layout" into README.md
+      devCommit = execSync(
+        'git log -1 --format="%H" -G "## Project layout" -- README.md',
+        { encoding: "utf8", cwd: repoRoot },
+      ).trim();
     } catch {
-      // If git is unavailable or there's no parent commit, skip this check
+      // git unavailable — skip
       return;
     }
 
-    const files = changedFiles.split("\n").filter((f) => f.trim().length > 0);
+    if (!devCommit) {
+      assert.fail(
+        "Could not find a commit that introduced '## Project layout' in README.md",
+      );
+    }
+
+    // List all files changed in that commit
+    const changedFiles = execSync(
+      `git diff-tree --no-commit-id -r --name-only ${devCommit}`,
+      { encoding: "utf8", cwd: repoRoot },
+    )
+      .trim()
+      .split("\n")
+      .filter((f) => f.trim().length > 0);
+
     assert.deepEqual(
-      files,
+      changedFiles,
       ["README.md"],
-      `Only README.md should be modified in the PR, but found: ${files.join(", ")}`,
+      `The Dev commit (${devCommit.slice(0, 8)}) must only modify README.md, but found: ${changedFiles.join(", ")}`,
     );
   });
 
