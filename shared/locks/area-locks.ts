@@ -207,6 +207,13 @@ export type ReleaseAreaLocksRequest = {
 export async function releaseAreaLocks(
   opts: ReleaseAreaLocksRequest,
 ): Promise<void> {
+  // Releasing zero locks is a valid no-op. This matters on the contention
+  // path: acquireAreaLocks calls us with the locks it already took, and when
+  // the *first* requested area is contended that set is empty. Without this
+  // guard, normalizeAreaIds([]) throws "at least one area id is required",
+  // which escapes acquireAreaLocks and crashes the Dev run (exit 1) instead
+  // of returning { acquired: false } so the caller can queue a waiter.
+  if (opts.areaIds.length === 0) return;
   await Promise.all(
     normalizeAreaIds(opts.areaIds).map(async (areaId) => {
       let released = false;
