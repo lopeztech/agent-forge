@@ -21,6 +21,7 @@ import {
   TERMINAL_STATE_LABELS,
   isStateLabel,
 } from "../../../../shared/labels.ts";
+import { APPROVERS, type Command, hasLabel, parseCommand } from "./logic.ts";
 import {
   requireProduct,
   requireWriterInstallId,
@@ -68,27 +69,6 @@ type ProductRow = ProductConfig;
 
 function log(obj: Record<string, unknown>): void {
   console.log(JSON.stringify({ role: "comment-handler", ...obj }));
-}
-
-// ---------------------------------------------------------------------------
-// Command parsing + authority
-// ---------------------------------------------------------------------------
-
-type Command = "approve-cost" | "cancel";
-const APPROVERS = new Set(["OWNER", "MEMBER"]);
-
-function parseCommand(body: string): Command | undefined {
-  // First non-empty line is the command. Allows users to add explanatory
-  // text on later lines without the command being lost.
-  const first = body.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
-  if (!first) return undefined;
-  if (first === "/approve-cost") return "approve-cost";
-  if (first === "/cancel") return "cancel";
-  return undefined;
-}
-
-function hasLabel(labels: Array<{ name: string }>, name: string): boolean {
-  return labels.some((l) => l.name === name);
 }
 
 // Terminal states a /cancel must not touch.
