@@ -59,6 +59,7 @@ guidance; reach for these when you need depth:
 - [`docs/cost-model.md`](docs/cost-model.md) — pricing assumptions, per-role and per-issue spend estimates, monthly volume projections, and the mandatory budget circuit breaker + Bedrock quota rules.
 - [`docs/decisions.md`](docs/decisions.md) — dated architecture decision log (the "Resolved decisions" + open questions). Append new decisions here.
 - [`docs/runbook.md`](docs/runbook.md) — operational steps a human performs (onboarding the GitHub Apps, clearing `human-needed`, rotating keys).
+- [`docs/state-lifecycle.md`](docs/state-lifecycle.md) — **`state:done` definition and full label-transition sequence.** All five conditions that must be satisfied before `state:done` is applied, the actor that applies it (PO agent), the trigger event, and the ordered sequence of label transitions from `state:idea` to terminal state.
 
 ## Handoff protocol
 
@@ -75,13 +76,17 @@ state:awaiting-tests          → Test Engineer
 state:awaiting-functional     → Functional Tester
 state:awaiting-security       → Security Reviewer
 state:awaiting-po             → PO
-state:done                    (terminal)
+state:done                    (terminal — see docs/state-lifecycle.md for all conditions)
 human-needed                  (parked — only humans clear it)
 ```
 
 Each agent's last action sets the next label. A label change emits a webhook → API Gateway → EventBridge → matching rule → Step Function execution → ECS Fargate task with the right image. A per-issue Step Function execution wraps the full lifecycle so the workflow view shows the whole chain in one place.
 
 Cross-agent communication goes **only** through the issue and PR. No direct agent-to-agent calls. This keeps the audit trail in GitHub and prevents hidden state. See [`docs/architecture.md`](docs/architecture.md#roles) for what each role does on its trigger.
+
+For the full ordered label-transition sequence, the exact conditions that gate
+`state:done`, and the actor/trigger that applies it, see
+[`docs/state-lifecycle.md`](docs/state-lifecycle.md).
 
 ## Conventions for working in this repo
 
