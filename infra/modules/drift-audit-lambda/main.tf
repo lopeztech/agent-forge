@@ -65,6 +65,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["cloudwatch:PutMetricData"]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -94,6 +100,10 @@ resource "aws_lambda_function" "this" {
       ISSUE_STATE_TABLE = var.issue_state_table_name
       APP_SECRET_NAME   = var.app_secret_name
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   depends_on = [

@@ -50,6 +50,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["dynamodb:GetItem"]
     resources = [var.products_table_arn]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -78,6 +84,10 @@ resource "aws_lambda_function" "this" {
       PRODUCTS_TABLE  = var.products_table_name
       APP_SECRET_NAME = var.app_secret_name
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   depends_on = [

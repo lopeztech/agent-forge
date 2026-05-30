@@ -69,6 +69,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["states:DescribeExecution"]
     resources = local.execution_arns
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -105,6 +111,10 @@ resource "aws_lambda_function" "this" {
       STALE_MINUTES                = tostring(var.stale_minutes)
       BUCKET_MINUTES               = tostring(var.bucket_minutes)
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   depends_on = [

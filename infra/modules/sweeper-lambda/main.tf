@@ -56,6 +56,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["states:StartExecution"]
     resources = [var.dev_state_machine_arn]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -86,6 +92,10 @@ resource "aws_lambda_function" "this" {
       LOCK_WAITERS_TABLE    = var.lock_waiters_table_name
       DEV_STATE_MACHINE_ARN = var.dev_state_machine_arn
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   depends_on = [

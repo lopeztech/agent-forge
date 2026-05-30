@@ -61,6 +61,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["events:PutEvents"]
     resources = [var.event_bus_arn]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -92,6 +98,10 @@ resource "aws_lambda_function" "this" {
       EVENT_BUS_NAME      = var.event_bus_name
       EVENT_SOURCE        = "agent-forge.webhook"
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   depends_on = [

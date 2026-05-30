@@ -83,6 +83,12 @@ data "aws_iam_policy_document" "this" {
     actions   = ["cloudwatch:PutMetricData"]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -113,6 +119,10 @@ resource "aws_lambda_function" "this" {
       APP_SECRET_NAME               = var.app_secret_name
       AGENT_FORGE_RATE_LIMITS_TABLE = var.rate_limits_table_name
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   depends_on = [

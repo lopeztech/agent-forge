@@ -109,6 +109,12 @@ data "aws_iam_policy_document" "this" {
       ]
     }
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "this" {
@@ -146,6 +152,10 @@ resource "aws_lambda_function" "this" {
       AGENT_FORGE_RATE_LIMITS_TABLE = var.rate_limits_table_name
       AGENT_FORGE_FORENSIC_BUCKET   = var.forensic_bucket_name
     }
+  }
+
+  tracing_config {
+    mode = "Active"
   }
 
   depends_on = [

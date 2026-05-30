@@ -102,6 +102,12 @@ data "aws_iam_policy_document" "ba" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "ba" {
@@ -129,6 +135,10 @@ resource "aws_sfn_state_machine" "ba" {
     log_destination        = "${aws_cloudwatch_log_group.ba.arn}:*"
     include_execution_data = true
     level                  = "ALL"
+  }
+
+  tracing_configuration {
+    enabled = true
   }
 }
 
@@ -209,6 +219,12 @@ data "aws_iam_policy_document" "dev" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "dev" {
@@ -232,6 +248,10 @@ resource "aws_sfn_state_machine" "dev" {
     log_destination        = "${aws_cloudwatch_log_group.dev.arn}:*"
     include_execution_data = true
     level                  = "ALL"
+  }
+
+  tracing_configuration {
+    enabled = true
   }
 }
 
@@ -310,6 +330,12 @@ data "aws_iam_policy_document" "test" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "test" {
@@ -333,6 +359,10 @@ resource "aws_sfn_state_machine" "test" {
     log_destination        = "${aws_cloudwatch_log_group.test.arn}:*"
     include_execution_data = true
     level                  = "ALL"
+  }
+
+  tracing_configuration {
+    enabled = true
   }
 }
 
@@ -411,6 +441,12 @@ data "aws_iam_policy_document" "functional" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "functional" {
@@ -434,6 +470,10 @@ resource "aws_sfn_state_machine" "functional" {
     log_destination        = "${aws_cloudwatch_log_group.functional.arn}:*"
     include_execution_data = true
     level                  = "ALL"
+  }
+
+  tracing_configuration {
+    enabled = true
   }
 }
 
@@ -512,6 +552,12 @@ data "aws_iam_policy_document" "security" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "security" {
@@ -535,6 +581,10 @@ resource "aws_sfn_state_machine" "security" {
     log_destination        = "${aws_cloudwatch_log_group.security.arn}:*"
     include_execution_data = true
     level                  = "ALL"
+  }
+
+  tracing_configuration {
+    enabled = true
   }
 }
 
@@ -613,6 +663,12 @@ data "aws_iam_policy_document" "po" {
     ]
     resources = ["*"]
   }
+
+  statement {
+    sid       = "XRayWrite"
+    actions   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords", "xray:GetSamplingRules", "xray:GetSamplingTargets"]
+    resources = ["*"]
+  }
 }
 
 resource "aws_iam_role_policy" "po" {
@@ -636,5 +692,9 @@ resource "aws_sfn_state_machine" "po" {
     log_destination        = "${aws_cloudwatch_log_group.po.arn}:*"
     include_execution_data = true
     level                  = "ALL"
+  }
+
+  tracing_configuration {
+    enabled = true
   }
 }

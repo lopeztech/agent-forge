@@ -5,14 +5,15 @@
 # answers "what's happening right now?"; this dashboard answers "what
 # trends look like over time?". All widgets pull from the custom metrics
 # emitted by shared/metrics/emit.ts (namespace "agent-forge") via the
-# `env` dimension to scope to dev/prod.
+# `env` dimension to scope to dev/prod, plus native Step Functions metrics
+# for the pipeline traceability row.
 #
 # Layout (top to bottom):
 #   row 1   24h headline (total spend, run count, failure rate)
 #   row 2   spend over time, broken down by role
-#   row 3   spend over time, broken down by product
+#   row 3   cost estimator decisions
 #   row 4   long-running jobs (drift audit + hydration)
-#   row 5   cost estimator decisions
+#   row 5   pipeline traceability (executions started/failed per role)
 # ------------------------------------------------------------------------------
 
 resource "aws_cloudwatch_dashboard" "agent_forge" {
@@ -182,6 +183,56 @@ resource "aws_cloudwatch_dashboard" "agent_forge" {
           title  = "Backlog hydration (nightly)"
           view   = "timeSeries"
           period = 86400
+        }
+      },
+
+      # ----- Row 5: pipeline traceability — executions started per role --------
+      {
+        type   = "metric"
+        x      = 0
+        y      = 22
+        width  = 24
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/States", "ExecutionsStarted", "StateMachineArn", module.step_functions.ba_state_machine_arn, { stat = "Sum", label = "ba started" }],
+            ["AWS/States", "ExecutionsStarted", "StateMachineArn", module.step_functions.dev_state_machine_arn, { stat = "Sum", label = "dev started" }],
+            ["AWS/States", "ExecutionsStarted", "StateMachineArn", module.step_functions.test_state_machine_arn, { stat = "Sum", label = "test started" }],
+            ["AWS/States", "ExecutionsStarted", "StateMachineArn", module.step_functions.functional_state_machine_arn, { stat = "Sum", label = "functional started" }],
+            ["AWS/States", "ExecutionsStarted", "StateMachineArn", module.step_functions.security_state_machine_arn, { stat = "Sum", label = "security started" }],
+            ["AWS/States", "ExecutionsStarted", "StateMachineArn", module.step_functions.po_state_machine_arn, { stat = "Sum", label = "po started" }],
+          ]
+          region  = data.aws_region.current.name
+          title   = "Pipeline executions started by role"
+          view    = "timeSeries"
+          stacked = false
+          period  = 3600
+        }
+      },
+
+      # ----- Row 6: pipeline failures + timeouts per role ---------------------
+      {
+        type   = "metric"
+        x      = 0
+        y      = 28
+        width  = 24
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/States", "ExecutionsFailed", "StateMachineArn", module.step_functions.ba_state_machine_arn, { stat = "Sum", label = "ba failed" }],
+            ["AWS/States", "ExecutionsFailed", "StateMachineArn", module.step_functions.dev_state_machine_arn, { stat = "Sum", label = "dev failed" }],
+            ["AWS/States", "ExecutionsFailed", "StateMachineArn", module.step_functions.test_state_machine_arn, { stat = "Sum", label = "test failed" }],
+            ["AWS/States", "ExecutionsFailed", "StateMachineArn", module.step_functions.functional_state_machine_arn, { stat = "Sum", label = "functional failed" }],
+            ["AWS/States", "ExecutionsFailed", "StateMachineArn", module.step_functions.security_state_machine_arn, { stat = "Sum", label = "security failed" }],
+            ["AWS/States", "ExecutionsFailed", "StateMachineArn", module.step_functions.po_state_machine_arn, { stat = "Sum", label = "po failed" }],
+            ["AWS/States", "ExecutionsTimedOut", "StateMachineArn", module.step_functions.dev_state_machine_arn, { stat = "Sum", label = "dev timed out" }],
+            ["AWS/States", "ExecutionsTimedOut", "StateMachineArn", module.step_functions.test_state_machine_arn, { stat = "Sum", label = "test timed out" }],
+          ]
+          region  = data.aws_region.current.name
+          title   = "Pipeline failures and timeouts by role"
+          view    = "timeSeries"
+          stacked = false
+          period  = 3600
         }
       },
     ]
