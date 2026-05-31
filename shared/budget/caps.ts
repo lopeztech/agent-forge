@@ -239,27 +239,46 @@ async function writeRoleTrip(
   role: string,
   trip: BudgetTrip,
 ): Promise<void> {
-  // SET budget_tripped_roles.<role> = {at_iso, for_date, reason}
-  // Need to seed budget_tripped_roles as an empty map first if missing,
-  // since DDB's SET path doesn't auto-create nested attributes.
-  await ddb().send(
-    new UpdateCommand({
-      TableName: tableName,
-      Key: { product_id: productId },
-      UpdateExpression:
-        "SET budget_tripped_roles = if_not_exists(budget_tripped_roles, :empty), " +
-        "budget_tripped_roles.#role = :flag",
-      ExpressionAttributeNames: { "#role": role },
-      ExpressionAttributeValues: {
-        ":empty": {},
-        ":flag": {
-          at_iso: trip.trippedAtIso,
-          for_date: trip.forDate,
-          reason: trip.reason,
-        },
-      },
-    }),
-  );
+  // DynamoDB disallows setting a parent map AND a nested path in the same
+  // expression ("Two document paths overlap"). Fix: initialise the map in a
+  // separate conditional write, then set the role entry.
+  const flag = {
+    at_iso: trip.trippedAtIso,
+    for_date: trip.forDate,
+    reason: trip.reason,
+  };
+  try {
+    // Attempt 1: parent map already exists → write only the role sub-path.
+    await ddb().send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { product_id: productId },
+        ConditionExpression: "attribute_exists(budget_tripped_roles)",
+        UpdateExpression: "SET budget_tripped_roles.#role = :flag",
+        ExpressionAttributeNames: { "#role": role },
+        ExpressionAttributeValues: { ":flag": flag },
+      }),
+    );
+  } catch (e: unknown) {
+    if (
+      typeof e === "object" &&
+      e !== null &&
+      "name" in e &&
+      (e as { name: string }).name === "ConditionalCheckFailedException"
+    ) {
+      // Parent map missing — create it with this role entry in one write.
+      await ddb().send(
+        new UpdateCommand({
+          TableName: tableName,
+          Key: { product_id: productId },
+          UpdateExpression: "SET budget_tripped_roles = :map",
+          ExpressionAttributeValues: { ":map": { [role]: flag } },
+        }),
+      );
+    } else {
+      throw e;
+    }
+  }
 }
 
 // Formatter for the comment a role posts on park. Caller's role-specific
