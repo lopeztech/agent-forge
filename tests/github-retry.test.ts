@@ -5,7 +5,12 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { addLabels, postComment, removeLabel } from "../shared/github/repo.ts";
+import {
+  addLabels,
+  listPullRequestFiles,
+  postComment,
+  removeLabel,
+} from "../shared/github/repo.ts";
 
 type FetchCall = { url: string; init: RequestInit };
 
@@ -111,5 +116,31 @@ describe("gh() transient-401 retry", () => {
       /failed: 503/,
     );
     assert.equal(calls.length, 1, "5xx is not retried by this fix");
+  });
+});
+
+describe("listPullRequestFiles", () => {
+  it("paginates PR files until a short page", async () => {
+    installFetch([
+      jsonResponse(
+        200,
+        Array.from({ length: 100 }, (_, i) => ({ filename: `docs/${i}.md` })),
+      ),
+      jsonResponse(200, [{ filename: "AGENTS.md" }]),
+    ]);
+
+    const files = await listPullRequestFiles(OPTS, "owner/repo", 42);
+
+    assert.equal(files.length, 101);
+    assert.equal(files[0]!.filename, "docs/0.md");
+    assert.equal(files[100]!.filename, "AGENTS.md");
+    assert.match(
+      calls[0]!.url,
+      /\/repos\/owner\/repo\/pulls\/42\/files\?per_page=100&page=1$/,
+    );
+    assert.match(
+      calls[1]!.url,
+      /\/repos\/owner\/repo\/pulls\/42\/files\?per_page=100&page=2$/,
+    );
   });
 });

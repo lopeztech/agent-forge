@@ -253,6 +253,24 @@ export async function findOpenPRByHead(
   return list[0];
 }
 
+export async function listPullRequestFiles(
+  opts: RequestOptions,
+  repo: string,
+  prNumber: number,
+): Promise<Array<{ filename: string }>> {
+  const out: Array<{ filename: string }> = [];
+  for (let page = 1; ; page++) {
+    const r = await ghOrThrow(
+      opts,
+      "GET",
+      `/repos/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`,
+    );
+    const batch = (await r.json()) as Array<{ filename: string }>;
+    out.push(...batch);
+    if (batch.length < 100) return out;
+  }
+}
+
 export type MergePROpts = {
   // Squash is the agent-forge default — PRs stack Dev + Test (+ optional
   // Functional fixture) commits and a single squash commit on main keeps

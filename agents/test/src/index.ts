@@ -53,7 +53,9 @@ import {
 import { getInstallationTokenFromSecret } from "../../../shared/github/auth.ts";
 import {
   addLabels,
+  findOpenPRByHead,
   getIssue,
+  listPullRequestFiles,
   postComment,
   transitionLabel,
   type GitHubIssue,
@@ -83,6 +85,7 @@ import {
   setupTestWorkdir,
   type FinalizeTestResult,
 } from "./finalize.ts";
+import { isDocsOnlyTestChange } from "./docs-only.ts";
 import { normalizeTestSubmission, type TestSubmission } from "./plan.ts";
 import { clonePrBranch, type ClonedPrWorkdir } from "./workdir.ts";
 
@@ -337,6 +340,22 @@ function commentTestsAdded(args: {
     "",
     `Transitioning \`${STATE_LABELS.awaitingTests}\` → \`${STATE_LABELS.awaitingFunctional}\`.`,
   ].filter((s) => s !== "").join("\n");
+}
+
+function commentDocsOnlySkipped(args: {
+  runId: string;
+  changedFiles: string[];
+}): string {
+  return [
+    `## Test skipped for docs-only PR (run \`${args.runId}\`)`,
+    "",
+    "The PR only changes Markdown / documentation files, so no new automated tests are required.",
+    "",
+    "Changed files:",
+    ...args.changedFiles.map((path) => `- \`${path}\``),
+    "",
+    `Transitioning \`${STATE_LABELS.awaitingTests}\` → \`${STATE_LABELS.awaitingFunctional}\`.`,
+  ].join("\n");
 }
 
 function commentTestKickback(args: {
@@ -656,6 +675,61 @@ async function main(): Promise<void> {
 
   // Clone Dev's PR branch by convention.
   const branchName = `agent-forge/dev/issue-${ISSUE_NUMBER}`;
+  const pr = await findOpenPRByHead(ghOpts, REPO, branchName);
+  if (pr) {
+    const changedFiles = (await listPullRequestFiles(ghOpts, REPO, pr.number))
+      .map((file) => file.filename);
+    const docsOnly = isDocsOnlyTestChange(changedFiles);
+    log({
+      msg: "classified PR files",
+      pr_number: pr.number,
+      changed_files: changedFiles,
+      docs_only: docsOnly,
+    });
+    if (docsOnly) {
+      await postComment(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        commentDocsOnlySkipped({ runId, changedFiles }),
+      );
+      await transitionLabel(
+        ghOpts,
+        REPO,
+        ISSUE_NUMBER,
+        STATE_LABELS.awaitingTests,
+        STATE_LABELS.awaitingFunctional,
+      );
+      await recordSpend({
+        tableName: BUDGET_LEDGER_TABLE,
+        runId,
+        spend: {
+          product_id: PRODUCT_ID,
+          issue_number: ISSUE_NUMBER,
+          role: ROLE,
+          model: "none",
+          input_tokens: 0,
+          cached_tokens: 0,
+          output_tokens: 0,
+          cost_usd: 0,
+          note: "docs-only fast path",
+        },
+      });
+      await emitRoleRunFinished({
+        role: ROLE,
+        productId: PRODUCT_ID,
+        status: "succeeded",
+        costUsd: 0,
+      });
+      return;
+    }
+  } else {
+    log({
+      msg: "no open PR found for branch; continuing to clone path",
+      branch: branchName,
+    });
+  }
+
   let workdir: ClonedPrWorkdir | undefined;
   let finalizeResult: FinalizeTestResult | undefined;
   try {
