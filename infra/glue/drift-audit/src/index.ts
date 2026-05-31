@@ -5,8 +5,8 @@
 //
 // Job, per product:
 //   1. Read current spec/ from the target repo via GitHub.
-//   2. Query issue_state for up to N=5 recently-done issues that have
-//      spec_hashes_at_merge stored.
+//   2. Query issue_state for up to N=5 issues that have spec_hashes_at_merge
+//      stored, then verify each live GitHub issue is labeled state:done.
 //   3. For each, diff current vs stored hashes. On drift, file a new
 //      state:idea issue describing what changed under the shipped issue.
 //
@@ -27,6 +27,7 @@ import type { ScheduledEvent } from "aws-lambda";
 import { getInstallationTokenFromSecret } from "../../../../shared/github/auth.ts";
 import {
   createIssue,
+  getIssue,
   type RequestOptions,
 } from "../../../../shared/github/repo.ts";
 import { readSpecTree } from "../../../../shared/github/spec.ts";
@@ -38,7 +39,7 @@ import {
 } from "../../../../shared/github/spec-hashes.ts";
 import { emitDriftAuditRun } from "../../../../shared/metrics/emit.ts";
 import {
-  listDoneIssuesWithSpecHashes,
+  listIssuesWithSpecHashes,
   type IssueState,
 } from "../../../../shared/state/issue-state.ts";
 import {
@@ -47,6 +48,7 @@ import {
   type ProductConfig,
 } from "../../../../shared/state/products.ts";
 import { requiredEnv } from "../../../../shared/env.ts";
+import { hasStateDoneLabel } from "./logic.ts";
 
 const PRODUCTS_TABLE = requiredEnv("PRODUCTS_TABLE");
 const ISSUE_STATE_TABLE = requiredEnv("ISSUE_STATE_TABLE");
@@ -134,11 +136,13 @@ async function auditProduct(
 
   const horizonMs = DEFAULT_HORIZON_DAYS * 24 * 60 * 60 * 1000;
   const sinceIso = new Date(Date.now() - horizonMs).toISOString();
-  const issues = await listDoneIssuesWithSpecHashes({
+  const issues = await listIssuesWithSpecHashes({
     tableName: ISSUE_STATE_TABLE,
     productId,
     sinceIso,
-    limit: DEFAULT_SAMPLE_SIZE,
+    // Some baselined issues may still be parked at human-needed awaiting a
+    // human merge. Oversample cheaply, then stop after N live state:done issues.
+    limit: DEFAULT_SAMPLE_SIZE * 5,
   });
   log({
     msg: "sampled candidates",
@@ -147,40 +151,67 @@ async function auditProduct(
     horizon_days: DEFAULT_HORIZON_DAYS,
   });
 
+  let checked = 0;
   let drifted = 0;
   let filed = 0;
   for (const issue of issues) {
-    const baseline = issue.spec_hashes_at_merge?.hashes ?? {};
-    const diff = diffSpecHashes(baseline, currentHashes);
-    if (!hasDrift(diff)) continue;
-    drifted++;
-
+    const issueNumber = issue.issue_id;
+    let liveIssue;
     try {
-      const created = await fileDriftIssue({
-        ghOpts,
-        repo: product.repo_full_name,
-        merged: issue,
-        diff,
-      });
-      log({
-        msg: "filed drift issue",
-        product_id: productId,
-        for_issue: issue.issue_id,
-        new_issue: created.number,
-        new_issue_url: created.html_url,
-      });
-      filed++;
+      liveIssue = await getIssue(ghOpts, product.repo_full_name, issueNumber);
     } catch (err) {
       log({
-        msg: "filing drift issue failed (non-fatal)",
+        msg: "could not verify candidate issue state; skipping",
         product_id: productId,
-        for_issue: issue.issue_id,
+        issue: issueNumber,
         error: err instanceof Error ? err.message : String(err),
       });
+      continue;
     }
+    if (!hasStateDoneLabel(liveIssue.labels)) {
+      log({
+        msg: "candidate is not state:done; skipping",
+        product_id: productId,
+        issue: issueNumber,
+      });
+      continue;
+    }
+    checked++;
+
+    const baseline = issue.spec_hashes_at_merge?.hashes ?? {};
+    const diff = diffSpecHashes(baseline, currentHashes);
+    if (hasDrift(diff)) {
+      drifted++;
+
+      try {
+        const created = await fileDriftIssue({
+          ghOpts,
+          repo: product.repo_full_name,
+          merged: issue,
+          diff,
+        });
+        log({
+          msg: "filed drift issue",
+          product_id: productId,
+          for_issue: issue.issue_id,
+          new_issue: created.number,
+          new_issue_url: created.html_url,
+        });
+        filed++;
+      } catch (err) {
+        log({
+          msg: "filing drift issue failed (non-fatal)",
+          product_id: productId,
+          for_issue: issue.issue_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (checked >= DEFAULT_SAMPLE_SIZE) break;
   }
 
-  return { checked: issues.length, drifted, filed };
+  return { checked, drifted, filed };
 }
 
 async function fileDriftIssue(args: {

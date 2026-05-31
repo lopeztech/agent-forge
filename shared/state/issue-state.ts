@@ -247,7 +247,7 @@ export async function incrementKickback(
   return next;
 }
 
-export type ListDoneIssuesWithSpecHashesOpts = {
+export type ListIssuesWithSpecHashesOpts = {
   tableName: string;
   productId: string;
   // ISO timestamp. Only issues whose updated_at is at or after this cut-off
@@ -258,14 +258,16 @@ export type ListDoneIssuesWithSpecHashesOpts = {
   limit?: number;
 };
 
-// Query the product's issue_state partition for issues that look like a
-// drift-audit candidate: last_state="done" AND spec_hashes_at_merge is
-// present AND updated_at >= sinceIso. Returns at most `limit` matches.
+// Query the product's issue_state partition for issues that have a drift-audit
+// baseline: spec_hashes_at_merge is present AND updated_at >= sinceIso.
+// Returns at most `limit` matches.
 //
-// FilterExpression keeps the scan tight per partition; for v1 with low N
-// per product this is fine, and the drift audit only runs weekly.
-export async function listDoneIssuesWithSpecHashes(
-  opts: ListDoneIssuesWithSpecHashesOpts,
+// We intentionally do not rely on last_state here: humans can manually move an
+// issue from human-needed to state:done after a recommend-merge, and that label
+// transition does not write issue_state. The drift audit verifies the live
+// GitHub label before auditing a candidate.
+export async function listIssuesWithSpecHashes(
+  opts: ListIssuesWithSpecHashesOpts,
 ): Promise<IssueState[]> {
   const limit = opts.limit ?? 5;
   const sinceIso =
@@ -279,12 +281,10 @@ export async function listDoneIssuesWithSpecHashes(
         TableName: opts.tableName,
         KeyConditionExpression: "product_id = :p",
         FilterExpression:
-          "last_state = :done " +
-          "AND attribute_exists(spec_hashes_at_merge) " +
+          "attribute_exists(spec_hashes_at_merge) " +
           "AND updated_at >= :since",
         ExpressionAttributeValues: {
           ":p": opts.productId,
-          ":done": "state:done",
           ":since": sinceIso,
         },
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
