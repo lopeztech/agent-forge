@@ -62,6 +62,7 @@ module "hydration" {
 
   name_prefix     = var.name_prefix
   source_dir      = "${path.module}/../../glue/hydration/dist"
+  env             = "dev"
   app_secret_arn  = module.secrets.writer_secret_arn
   app_secret_name = module.secrets.writer_secret_name
 

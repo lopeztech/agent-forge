@@ -42,6 +42,7 @@ module "cost_estimator" {
 
   name_prefix     = var.name_prefix
   source_dir      = "${path.module}/../../glue/cost-estimator/dist"
+  env             = "dev"
   app_secret_arn  = module.secrets.writer_secret_arn
   app_secret_name = module.secrets.writer_secret_name
 

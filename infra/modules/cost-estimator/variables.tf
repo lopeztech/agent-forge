@@ -8,6 +8,11 @@ variable "source_dir" {
   description = "Path to the built JS bundle directory (infra/glue/cost-estimator/dist). package.sh must have been run before terraform plan/apply."
 }
 
+variable "env" {
+  type        = string
+  description = "Deployment environment name used for CloudWatch metric dimensions."
+}
+
 variable "app_secret_arn" {
   type        = string
   description = "ARN of the writer App Secrets Manager entry."

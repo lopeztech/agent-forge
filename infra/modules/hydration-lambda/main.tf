@@ -114,6 +114,7 @@ resource "aws_lambda_function" "this" {
 
   environment {
     variables = {
+      AGENT_FORGE_ENV               = var.env
       PRODUCTS_TABLE                = var.products_table_name
       BUDGET_LEDGER_TABLE           = var.budget_ledger_table_name
       APP_SECRET_NAME               = var.app_secret_name
